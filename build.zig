@@ -12,6 +12,8 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
 
     const exe = b.addExecutable("zwld", "src/main.zig");
+    exe.addPackagePath("clap", "lib/zig-clap/clap.zig");
+    exe.addPackagePath("wasmparser", "lib/wasmparser/src/lib.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
