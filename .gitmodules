@@ -1,0 +1,6 @@
+[submodule "lib/wasmparser"]
+	path = lib/wasmparser
+	url = https://github.com/Luukdegram/wasmparser.git
+[submodule "lib/zig-clap"]
+	path = lib/zig-clap
+	url = https://github.com/Hejsil/zig-clap.git
