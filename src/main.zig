@@ -50,18 +50,18 @@ fn summarizeHeaders(path: []const u8) !void {
 
     print("\n{s}:      file format wasm 0x{x:2>0}\n\n", .{ path, module.version });
     print("Sections:\n\n", .{});
-    if (module.types.len != 0) print("Type count: {d}\n", .{module.types.len});
-    if (module.imports.len != 0) print("Import count: {d}\n", .{module.types.len});
-    if (module.functions.len != 0) print("Function count: {d}\n", .{module.types.len});
-    if (module.tables.len != 0) print("Table count: {d}\n", .{module.types.len});
-    if (module.memories.len != 0) print("Memory count: {d}\n", .{module.types.len});
-    if (module.globals.len != 0) print("Global count: {d}\n", .{module.types.len});
-    if (module.exports.len != 0) print("Export count: {d}\n", .{module.types.len});
-    if (module.elements.len != 0) print("Element count: {d}\n", .{module.types.len});
-    if (module.code.len != 0) print("Code count: {d}\n", .{module.types.len});
-    if (module.data.len != 0) print("Data count: {d}\n", .{module.types.len});
+    if (module.types.data.len != 0) print("{}\n", .{module.types});
+    if (module.imports.data.len != 0) print("{}\n", .{module.imports});
+    if (module.functions.data.len != 0) print("{}\n", .{module.functions});
+    if (module.tables.data.len != 0) print("{}\n", .{module.tables});
+    if (module.memories.data.len != 0) print("{}\n", .{module.memories});
+    if (module.globals.data.len != 0) print("{}\n", .{module.globals});
+    if (module.exports.data.len != 0) print("{}\n", .{module.exports});
+    if (module.elements.data.len != 0) print("{}\n", .{module.elements});
+    if (module.code.data.len != 0) print("{}\n", .{module.code});
+    if (module.data.data.len != 0) print("{}\n", .{module.data});
     for (module.custom) |custom| {
-        print("Custom \"{s}\"\n", .{custom.name});
+        print("{}\n", .{custom});
     }
 }
 
