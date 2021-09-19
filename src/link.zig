@@ -368,3 +368,58 @@ pub const ComdatSym = struct {
         WASM_COMDAT_SECTION = 5,
     };
 };
+
+pub const Features = struct {
+    list: []const Features,
+
+    pub fn fromReader(gpa: *Allocator, reader: anytype) !Features {
+        const count = try leb.readULEB128(u32, reader);
+
+        var entries = std.ArrayList(Feature).initCapacity(gpa, count);
+        errdefer for (entries.items) |feature| {
+            gpa.free(feature.name);
+        } else entries.deinit();
+
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const prefix = try leb.readULEB128(u8, reader);
+            const name_len = try leb.readULEB128(u32, reader);
+            const name = try gpa.alloc(u8, name_len); // cleaned up above errdefer on error
+            const entry = entries.addOneAssumeCapacity();
+            entry.* = .{
+                .prefix = prefix,
+                .name = name,
+            };
+            try reader.readNoEof(name);
+
+            if (!known_features.has(name)) {
+                std.log.info("Detected unknown feature: {s}", .{name});
+            }
+        }
+
+        return .{ .list = entries.toOwnedSlice() };
+    }
+};
+
+pub const Feature = struct {
+    /// Provides information about the usage of the feature.
+    /// - '0x2b' (+): Object uses this feature, and the link fails if feature is not in the allowed set.
+    /// - '0x2d' (-): Object does not use this feature, and the link fails if this feature is in the allowed set.
+    /// - '0x3d' (=): Object uses this feature, and the link fails if this feature is not in the allowed set,
+    /// or if any object does not use this feature.
+    prefix: u8,
+    /// name of the feature, must be unique in the sequence of features.
+    name: []const u8,
+};
+
+pub const known_features = std.ComptimeStringMap(void, .{
+    .{"atomics"},
+    .{"bulk-memory"},
+    .{"exception-handling"},
+    .{"multivalue"},
+    .{"mutable-globals"},
+    .{"nontrapping-fptoint"},
+    .{"sign-ext"},
+    .{"simd128"},
+    .{"tail-call"},
+});
