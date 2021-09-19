@@ -2,6 +2,7 @@ const std = @import("std");
 const wasm = @import("wasmparser").wasm;
 const leb = std.leb;
 const Allocator = std.mem.Allocator;
+const log = std.log.scoped(.zwld);
 
 pub const Relocations = struct {
     /// Index of the target section
@@ -77,8 +78,8 @@ pub const Relocation = struct {
     };
 
     /// From a given `reader` will parse the data into a `Relocation`
-    pub fn fromReader(reader: anytype) @TypeOf(reader).Error!Relocation {
-        const rel_type = try leb.readULEB128(u8, reader);
+    pub fn fromReader(reader: anytype) !Relocation {
+        const rel_type = try reader.readByte(reader);
         const rel_type_enum = @intToEnum(Type, rel_type);
         return Relocation{
             .relocation_type = rel_type_enum,
@@ -112,12 +113,15 @@ pub const LinkMetaData = struct {
     /// A sequence of subsections
     subsections: []const Subsection,
 
-    pub fn fromReader(gpa: *Allocator, reader: anytype) (@TypeOf(reader).Error || error{UnexpectedVersion})!LinkMetaData {
+    pub fn fromReader(gpa: *Allocator, reader: anytype) !LinkMetaData {
         const version = try leb.readULEB128(u32, reader);
+        log.info("Link meta data version: {d}", .{version});
         if (version != 2) return error.UnexpectedVersion;
 
         const count = try leb.readULEB128(u32, reader);
-        var subsections = std.ArrayList(Subsection).initCapacity(gpa, count);
+        log.info("Found {d} subsections", .{count});
+
+        var subsections = try std.ArrayList(Subsection).initCapacity(gpa, count);
         errdefer subsections.deinit();
 
         var i: usize = 0;
@@ -154,9 +158,11 @@ pub const Subsection = union(enum) {
 
     /// Returns an `Subsection` union that sets the corresponding tag and fields
     /// based on the subsection's type that was found.
-    pub fn fromReader(gpa: *Allocator, reader: anytype) @TypeOf(reader)!Subsection {
-        const sub_type = try leb.readULEB128(u8, reader);
+    pub fn fromReader(gpa: *Allocator, reader: anytype) !Subsection {
+        const sub_type = try reader.readByte();
+        log.info("Subsection type: {d}", .{@intToEnum(Subsection.Type, sub_type)});
         const payload_len = try leb.readULEB128(u32, reader);
+        log.info("Subsection payload size: {d}", .{payload_len});
         var limited = std.io.limitedReader(reader, payload_len);
         const limited_reader = limited.reader();
 
@@ -164,7 +170,7 @@ pub const Subsection = union(enum) {
         const count = try leb.readULEB128(u32, limited_reader);
 
         switch (@intToEnum(Type, sub_type)) {
-            .segment_info => {
+            .WASM_SEGMENT_INFO => {
                 var segments = try std.ArrayList(Segment).initCapacity(gpa, count);
                 errdefer segments.deinit();
 
@@ -175,7 +181,7 @@ pub const Subsection = union(enum) {
                 }
                 return Subsection{ .segment_info = segments.toOwnedSlice() };
             },
-            .init_funcs => {
+            .WASM_INIT_FUNCS => {
                 var funcs = try std.ArrayList(InitFunc).initCapacity(gpa, count);
                 errdefer funcs.deinit();
 
@@ -190,32 +196,33 @@ pub const Subsection = union(enum) {
 
                 return Subsection{ .init_funcs = funcs.toOwnedSlice() };
             },
-            .comdat_info => {
+            .WASM_COMDAT_INFO => {
                 var comdats = try std.ArrayList(Comdat).initCapacity(gpa, count);
                 errdefer comdats.deinit();
 
                 var i: usize = 0;
                 while (i < count) : (i += 1) {
                     const comdat = comdats.addOneAssumeCapacity();
-                    comdat.* = Comdat.fromReader(gpa, limited_reader);
+                    comdat.* = try Comdat.fromReader(gpa, limited_reader);
                 }
                 return Subsection{ .comdat_info = comdats.toOwnedSlice() };
             },
-            .symbol_table => {
+            .WASM_SYMBOL_TABLE => {
                 var symbols = try std.ArrayList(SymInfo).initCapacity(gpa, count);
                 errdefer symbols.deinit();
 
                 var i: usize = 0;
                 while (i < count) : (i += 1) {
-                    const symbol = try symbols.addOneAssumeCapacity();
+                    const symbol = symbols.addOneAssumeCapacity();
                     symbol.* = .{
-                        .kind = @intToEnum(SymInfo.Type, try leb.readULEB128(u8, limited_reader)),
+                        .kind = @intToEnum(SymInfo.Type, try limited_reader.readByte()),
                         .flags = try leb.readULEB128(u32, limited_reader),
                     };
                 }
 
                 return Subsection{ .symbol_table = symbols.toOwnedSlice() };
             },
+            else => @panic("TODO: Unimplemented section found"),
         }
     }
 
@@ -243,7 +250,7 @@ pub const Segment = struct {
 
     pub fn fromReader(gpa: *Allocator, reader: anytype) !Segment {
         const name_len = try leb.readULEB128(u32, reader);
-        const name = gpa.alloc(u8, name_len);
+        const name = try gpa.alloc(u8, name_len);
         errdefer gpa.free(name);
         try reader.readNoEof(name);
 
@@ -270,7 +277,7 @@ pub const Comdat = struct {
 
     pub fn fromReader(gpa: *Allocator, reader: anytype) !Comdat {
         const name_len = try leb.readULEB128(u32, reader);
-        const name = gpa.alloc(u8, name_len);
+        const name = try gpa.alloc(u8, name_len);
         errdefer gpa.free(name);
 
         const flags = try leb.readULEB128(u32, reader);
@@ -286,7 +293,7 @@ pub const Comdat = struct {
         while (i < symbol_count) : (i += 1) {
             const symbol = symbols.addOneAssumeCapacity();
             symbol.* = .{
-                .kind = @intToEnum(ComdatSym.Type, try leb.readULEB128(u8, reader)),
+                .kind = @intToEnum(ComdatSym.Type, try reader.readByte()),
                 .index = try leb.readULEB128(u32, reader),
             };
         }
@@ -382,7 +389,7 @@ pub const Features = struct {
 
         var i: usize = 0;
         while (i < count) : (i += 1) {
-            const prefix = try leb.readULEB128(u8, reader);
+            const prefix = try reader.readByte();
             const name_len = try leb.readULEB128(u32, reader);
             const name = try gpa.alloc(u8, name_len); // cleaned up above errdefer on error
             const entry = entries.addOneAssumeCapacity();

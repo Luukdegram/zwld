@@ -2,6 +2,8 @@ const std = @import("std");
 const io = std.io;
 const clap = @import("clap");
 const wasmparser = @import("wasmparser");
+const Linker = @import("Linker.zig");
+const metadata = @import("metadata.zig");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const ally = &gpa.allocator;
@@ -13,7 +15,9 @@ pub fn main() !void {
     const params = comptime [_]clap.Param(clap.Help){
         clap.parseParam("    --help             Display this help and exit.              ") catch unreachable,
         clap.parseParam("-h, --h                Display summaries of the headers of each section.") catch unreachable,
-        clap.parseParam("<POS>...") catch unreachable,
+        clap.parseParam("-o, --output <STR>     Path to file to write output to.") catch unreachable,
+        clap.parseParam("-s, --symbols          Display the symbol table") catch unreachable,
+        clap.parseParam("<FILE>...") catch unreachable,
     };
 
     var diag: clap.Diagnostic = .{};
@@ -33,6 +37,13 @@ pub fn main() !void {
         try clap.help(writer(), &params);
     } else if (args.flag("-h")) {
         try summarizeHeaders(positionals[0]);
+    } else if (args.option("-o") != null) {
+        const output_path = args.option("-o").?;
+        try linkFileAndWriteToPath(positionals[0], output_path);
+        return;
+    } else if (args.flag("-s")) {
+        try summarizeSymbols(positionals[0]);
+        return;
     } else {
         try clap.help(writer(), &params);
     }
@@ -63,6 +74,53 @@ fn summarizeHeaders(path: []const u8) !void {
     for (module.custom) |custom| {
         print("{}\n", .{custom});
     }
+}
+
+fn summarizeSymbols(path: []const u8) !void {
+    const file = std.fs.cwd().openFile(path, .{}) catch {
+        print("Could not open file: {s}", .{path});
+        return;
+    };
+    defer file.close();
+    var result = try wasmparser.parse(ally, file.reader());
+    defer result.deinit(ally);
+    const module = result.module;
+
+    const symbols_section = module.customByName("linking") orelse {
+        print("Wasm object file is missing \"linking\" section", .{});
+        return;
+    };
+
+    var symbols = std.ArrayList(metadata.SymInfo).init(ally);
+    defer symbols.deinit();
+
+    var section_reader = std.io.fixedBufferStream(symbols_section.data);
+    var link_metadata = try metadata.LinkMetaData.fromReader(ally, section_reader.reader());
+    defer link_metadata.deinit(ally);
+
+    for (link_metadata.subsections) |subsection| {
+        if (subsection == .symbol_table) {
+            try symbols.appendSlice(subsection.symbol_table);
+        }
+    }
+
+    for (symbols.items) |symbol| {
+        print("{}\n", .{symbol});
+    }
+}
+
+fn linkFileAndWriteToPath(in_path: []const u8, out_path: []const u8) !void {
+    const file_in = std.fs.cwd().openFile(in_path, .{}) catch |err| {
+        return print("Could not open file {s} due to error: {s}\n", .{ in_path, @errorName(err) });
+    };
+    defer file_in.close();
+    const file_out = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+        return print("Could not create file {s} due to error: {s}\n", .{ out_path, @errorName(err) });
+    };
+    defer file_out.close();
+    print("TODO!", .{});
+
+    // try Linker.link(ally, file_in.reader(), file_out.writer());
 }
 
 fn print(comptime fmt: []const u8, args: anytype) void {
