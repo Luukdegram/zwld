@@ -113,21 +113,19 @@ pub const LinkMetaData = struct {
     /// A sequence of subsections
     subsections: []const Subsection,
 
-    pub fn fromReader(gpa: *Allocator, reader: anytype) !LinkMetaData {
-        const version = try leb.readULEB128(u32, reader);
+    pub fn fromReader(gpa: *Allocator, reader: anytype, payload_size: usize) !LinkMetaData {
+        var limited = std.io.limitedReader(reader, payload_size);
+        const limited_reader = limited.reader();
+
+        const version = try leb.readULEB128(u32, limited_reader);
         log.info("Link meta data version: {d}", .{version});
         if (version != 2) return error.UnexpectedVersion;
 
-        const count = try leb.readULEB128(u32, reader);
-        log.info("Found {d} subsections", .{count});
+        var subsections = std.ArrayList(Subsection).init(gpa);
 
-        var subsections = try std.ArrayList(Subsection).initCapacity(gpa, count);
-        errdefer subsections.deinit();
-
-        var i: usize = 0;
-        while (i < count) : (i += 1) {
-            const subsection = subsections.addOneAssumeCapacity();
-            subsection.* = try Subsection.fromReader(gpa, reader);
+        while (limited.bytes_left > 0) {
+            const subsection = try subsections.addOne();
+            subsection.* = try Subsection.fromReader(gpa, limited_reader);
         }
 
         return LinkMetaData{
@@ -137,6 +135,9 @@ pub const LinkMetaData = struct {
     }
 
     pub fn deinit(self: *LinkMetaData, gpa: *Allocator) void {
+        for (self.subsections) |subsection| {
+            subsection.deinit(gpa);
+        }
         gpa.free(self.subsections);
         self.* = undefined;
     }
@@ -147,22 +148,22 @@ pub const Subsection = union(enum) {
     init_funcs: []const InitFunc,
     comdat_info: []const Comdat,
     symbol_table: []const SymInfo,
+    empty: void,
 
     pub const Type = enum(u8) {
         WASM_SEGMENT_INFO = 5,
         WASM_INIT_FUNCS = 6,
         WASM_COMDAT_INFO = 7,
         WASM_SYMBOL_TABLE = 8,
-        _,
     };
 
     /// Returns an `Subsection` union that sets the corresponding tag and fields
     /// based on the subsection's type that was found.
     pub fn fromReader(gpa: *Allocator, reader: anytype) !Subsection {
-        const sub_type = try reader.readByte();
-        log.info("Subsection type: {d}", .{@intToEnum(Subsection.Type, sub_type)});
+        const sub_type = try leb.readULEB128(u8, reader);
+        log.info("Found subsection: {s}", .{@tagName(@intToEnum(Subsection.Type, sub_type))});
         const payload_len = try leb.readULEB128(u32, reader);
-        log.info("Subsection payload size: {d}", .{payload_len});
+        if (payload_len == 0) return Subsection{ .empty = {} };
         var limited = std.io.limitedReader(reader, payload_len);
         const limited_reader = limited.reader();
 
@@ -178,6 +179,11 @@ pub const Subsection = union(enum) {
                 while (i < count) : (i += 1) {
                     const segment = segments.addOneAssumeCapacity();
                     segment.* = try Segment.fromReader(gpa, limited_reader);
+                    log.info("Found segment: {s} align({d}) flags({b})", .{
+                        segment.name,
+                        segment.alignment,
+                        segment.flags,
+                    });
                 }
                 return Subsection{ .segment_info = segments.toOwnedSlice() };
             },
@@ -192,6 +198,7 @@ pub const Subsection = union(enum) {
                         .priority = try leb.readULEB128(u32, limited_reader),
                         .symbol_index = try leb.readULEB128(u32, limited_reader),
                     };
+                    log.info("Found function - prio: {d}, index: {d}", .{ func.priority, func.symbol_index });
                 }
 
                 return Subsection{ .init_funcs = funcs.toOwnedSlice() };
@@ -214,19 +221,20 @@ pub const Subsection = union(enum) {
                 var i: usize = 0;
                 while (i < count) : (i += 1) {
                     const symbol = symbols.addOneAssumeCapacity();
-                    symbol.* = .{
-                        .kind = @intToEnum(SymInfo.Type, try limited_reader.readByte()),
-                        .flags = try leb.readULEB128(u32, limited_reader),
-                    };
+                    symbol.* = try SymInfo.fromReader(gpa, limited_reader);
+                    log.info("Found symbol: type({s}) name({s}) flags(0x{x})", .{
+                        @tagName(symbol.kind),
+                        symbol.name,
+                        symbol.flags,
+                    });
                 }
 
                 return Subsection{ .symbol_table = symbols.toOwnedSlice() };
             },
-            else => @panic("TODO: Unimplemented section found"),
         }
     }
 
-    pub fn deinit(self: *Subsection, gpa: *Allocator) void {
+    pub fn deinit(self: Subsection, gpa: *Allocator) void {
         switch (self) {
             .segment_info => |segment_info| for (segment_info) |segment| {
                 gpa.free(segment.name);
@@ -235,7 +243,12 @@ pub const Subsection = union(enum) {
             .comdat_info => |comdats| for (comdats) |comdat| {
                 comdat.deinit(gpa);
             } else gpa.free(comdats),
-            .symbol_table => |table| gpa.free(table),
+            .symbol_table => |table| for (table) |symbol| {
+                if (symbol.name) |name| {
+                    gpa.free(name);
+                }
+            } else gpa.free(table),
+            .empty => {},
         }
     }
 };
@@ -293,7 +306,7 @@ pub const Comdat = struct {
         while (i < symbol_count) : (i += 1) {
             const symbol = symbols.addOneAssumeCapacity();
             symbol.* = .{
-                .kind = @intToEnum(ComdatSym.Type, try reader.readByte()),
+                .kind = @intToEnum(ComdatSym.Type, try leb.readULEB128(u8, reader)),
                 .index = try leb.readULEB128(u32, reader),
             };
         }
@@ -316,8 +329,21 @@ pub const SymInfo = struct {
     /// Bitfield containings flags for a symbol
     /// Can contain any of the flags defined in `SymbolFlag`
     flags: u32,
+    /// The index of the Wasm object corresponding to the symbol.
+    /// When `WASM_SYM_UNDEFINED` flag is set, this refers to an import.
+    /// Can be `null` when it refers to a data symbol that is undefined.
+    index: ?u32 = null,
+    /// Symbol name, can be `null` when index refers to an import and
+    /// `WASM_SYM_EXPLICIT_NAME` is not set.
+    name: ?[]const u8 = null,
+    /// Offset within the segment. Must be smaller than segment's size, and is only
+    /// set when the symbol is defined.
+    offset: ?u32 = null,
+    /// Set when the symbol is defined, can be zero and must be smaller than segment's
+    /// size where offset + size.
+    size: ?u32 = null,
 
-    pub fn hasFlag(self: SymbolFlag, flag: SymbolFlag) bool {
+    pub fn hasFlag(self: SymInfo, flag: SymbolFlag) bool {
         return self.flags & @enumToInt(flag) != 0;
     }
 
@@ -328,11 +354,70 @@ pub const SymInfo = struct {
     pub const Type = enum(u8) {
         SYMTAB_FUNCTION = 0,
         SYMTAB_DATA = 1,
-        SYMTAB_GLOABL = 2,
+        SYMTAB_GLOBAL = 2,
         SYMTAB_SECTION = 3,
         SYMTAB_EVENT = 4,
         SYMTAB_TABLE = 5,
     };
+
+    pub fn fromReader(gpa: *Allocator, reader: anytype) !SymInfo {
+        var symbol: SymInfo = undefined;
+
+        symbol.kind = @intToEnum(Type, try leb.readULEB128(u8, reader));
+        symbol.flags = try leb.readULEB128(u32, reader);
+
+        switch (symbol.kind) {
+            .SYMTAB_DATA => {
+                const name_len = try leb.readULEB128(u32, reader);
+                const name = try gpa.alloc(u8, name_len);
+                errdefer gpa.free(name);
+                try reader.readNoEof(name);
+                symbol.name = name;
+                symbol.index = try leb.readULEB128(u32, reader);
+                symbol.offset = try leb.readULEB128(u32, reader);
+                symbol.size = try leb.readULEB128(u32, reader);
+            },
+            .SYMTAB_SECTION => {
+                symbol.index = try leb.readULEB128(u32, reader);
+            },
+            else => {
+                symbol.index = try leb.readULEB128(u32, reader);
+
+                const is_import = symbol.hasFlag(.WASM_SYM_UNDEFINED);
+                const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
+                if (!(is_import and !explicit_name)) {
+                    const name_len = try leb.readULEB128(u32, reader);
+                    const name = try gpa.alloc(u8, name_len);
+                    errdefer gpa.free(name);
+                    try reader.readNoEof(name);
+                    symbol.name = name;
+                }
+            },
+        }
+        return symbol;
+    }
+
+    /// Formats the symbol into human-readable text
+    pub fn format(self: SymInfo, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+
+        const kind_fmt: u8 = switch (self.kind) {
+            .SYMTAB_FUNCTION => 'F',
+            .SYMTAB_DATA => 'D',
+            .SYMTAB_GLOBAL => 'G',
+            .SYMTAB_SECTION => 'S',
+            .SYMTAB_EVENT => 'E',
+            .SYMTAB_TABLE => 'T',
+        };
+        const visible: []const u8 = if (self.hasFlag(.WASM_SYM_VISIBILITY_HIDDEN)) "no" else "yes";
+        const binding: []const u8 = if (self.hasFlag(.WASM_SYM_BINDING_LOCAL)) "local" else "global";
+
+        try writer.print(
+            "{c} binding={s} visible={s} id={d} name={s}",
+            .{ kind_fmt, binding, visible, self.index, self.name },
+        );
+    }
 };
 
 pub const SymbolFlag = enum(u32) {
