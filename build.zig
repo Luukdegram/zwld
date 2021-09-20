@@ -11,11 +11,17 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
+    const enable_logging = b.option(bool, "enable-logging", "Enables logging to stderr [default: false]") orelse false;
+
     const exe = b.addExecutable("zwld", "src/main.zig");
     exe.addPackagePath("clap", "lib/zig-clap/clap.zig");
     exe.addPackagePath("wasmparser", "lib/wasmparser/src/lib.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
+
+    const options = b.addOptions();
+    options.addOption(bool, "enable_logging", enable_logging);
+    exe.addOptions("build_flags", options);
     exe.install();
 
     const run_cmd = exe.run();

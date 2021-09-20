@@ -8,6 +8,17 @@ const metadata = @import("metadata.zig");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const ally = &gpa.allocator;
 
+pub fn log(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (@import("build_flags").enable_logging) {
+        std.log.defaultLog(level, scope, format, args);
+    }
+}
+
 pub fn main() !void {
     defer if (std.builtin.mode == .Debug) {
         _ = gpa.deinit();
@@ -94,9 +105,12 @@ fn summarizeSymbols(path: []const u8) !void {
     var symbols = std.ArrayList(metadata.SymInfo).init(ally);
     defer symbols.deinit();
 
+    // use an arena for now as we're going to re-write this entire logic soon
+    var arena = std.heap.ArenaAllocator.init(ally);
+    defer arena.deinit();
+
     var section_reader = std.io.fixedBufferStream(symbols_section.data);
-    var link_metadata = try metadata.LinkMetaData.fromReader(ally, section_reader.reader());
-    defer link_metadata.deinit(ally);
+    var link_metadata = try metadata.LinkMetaData.fromReader(&arena.allocator, section_reader.reader(), symbols_section.data.len);
 
     for (link_metadata.subsections) |subsection| {
         if (subsection == .symbol_table) {
@@ -104,8 +118,10 @@ fn summarizeSymbols(path: []const u8) !void {
         }
     }
 
-    for (symbols.items) |symbol| {
-        print("{}\n", .{symbol});
+    print("\n{s}:      file format wasm 0x{x:2>0}\n\n", .{ path, module.version });
+    print("Symbol table:\n\n", .{});
+    for (symbols.items) |symbol, i| {
+        print(" {d}: {}\n", .{ i, symbol });
     }
 }
 
@@ -119,8 +135,6 @@ fn linkFileAndWriteToPath(in_path: []const u8, out_path: []const u8) !void {
     };
     defer file_out.close();
     print("TODO!", .{});
-
-    // try Linker.link(ally, file_in.reader(), file_out.writer());
 }
 
 fn print(comptime fmt: []const u8, args: anytype) void {
