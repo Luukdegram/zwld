@@ -13,11 +13,13 @@ once that is completed, dynamic linking will be tackled.
 ## Usage
 ```sh
 zwld [-h] [--help] <FILE>
-           --help  Display this help and exit.
-       -h, --h     Display summaries of the headers of each section.
+           --help           Display this help and exit.
+       -h, --h              Display summaries of the headers of each section.
+       -o, --output <STR>   Path to file to write output to.
+       -s, --symbols        Display the symbol table
 ```
 
-As we currently only support output for headers, this will look like below:
+An example from dumping all headers of an object file:
 ```sh
 zwld test/trivial.obj.wasm -h
 
