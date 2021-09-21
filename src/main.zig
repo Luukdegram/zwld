@@ -1,7 +1,7 @@
 const std = @import("std");
 const io = std.io;
 const clap = @import("clap");
-const wasmparser = @import("wasmparser");
+const Object = @import("Object.zig");
 const Linker = @import("Linker.zig");
 const metadata = @import("metadata.zig");
 
@@ -28,6 +28,7 @@ pub fn main() !void {
         clap.parseParam("-h, --h                Display summaries of the headers of each section.") catch unreachable,
         clap.parseParam("-o, --output <STR>     Path to file to write output to.") catch unreachable,
         clap.parseParam("-s, --symbols          Display the symbol table") catch unreachable,
+        clap.parseParam("-r, --reloc            Display the relocations") catch unreachable,
         clap.parseParam("<FILE>...") catch unreachable,
     };
 
@@ -38,15 +39,18 @@ pub fn main() !void {
     };
     defer args.deinit();
 
+    if (args.flag("--help")) {
+        try clap.help(writer(), &params);
+        return;
+    }
+
     const positionals = args.positionals();
     if (positionals.len == 0) {
         print("Missing file path argument", .{});
         return;
     }
 
-    if (args.flag("--help")) {
-        try clap.help(writer(), &params);
-    } else if (args.flag("-h")) {
+    if (args.flag("-h")) {
         try summarizeHeaders(positionals[0]);
     } else if (args.option("-o") != null) {
         const output_path = args.option("-o").?;
@@ -55,6 +59,8 @@ pub fn main() !void {
     } else if (args.flag("-s")) {
         try summarizeSymbols(positionals[0]);
         return;
+    } else if (args.flag("-r")) {
+        try summarizeRelocs(positionals[0]);
     } else {
         try clap.help(writer(), &params);
     }
@@ -66,7 +72,7 @@ fn summarizeHeaders(path: []const u8) !void {
         return;
     };
     defer file.close();
-    var result = try wasmparser.parse(ally, file.reader());
+    var result = try Object.parse(ally, file.reader());
     defer result.deinit(ally);
     const module = result.module;
 
@@ -93,7 +99,7 @@ fn summarizeSymbols(path: []const u8) !void {
         return;
     };
     defer file.close();
-    var result = try wasmparser.parse(ally, file.reader());
+    var result = try Object.parse(ally, file.reader());
     defer result.deinit(ally);
     const module = result.module;
 
@@ -123,6 +129,11 @@ fn summarizeSymbols(path: []const u8) !void {
     for (symbols.items) |symbol, i| {
         print(" {d}: {}\n", .{ i, symbol });
     }
+}
+
+fn summarizeRelocs(path: []const u8) !void {
+    _ = path;
+    @panic("TODO");
 }
 
 fn linkFileAndWriteToPath(in_path: []const u8, out_path: []const u8) !void {
