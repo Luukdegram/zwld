@@ -17,9 +17,11 @@ zwld [-h] [--help] <FILE>
        -h, --h              Display summaries of the headers of each section.
        -o, --output <STR>   Path to file to write output to.
        -s, --symbols        Display the symbol table
+       -r, --reloc          Display the the relocations
+       -a, --all            Display section headers, symbols and relocations
 ```
 
-An example from dumping all headers of an object file:
+An example from dumping all available information (using -a):
 ```sh
 zwld test/trivial.obj.wasm -h
 
@@ -34,4 +36,20 @@ Sections:
     Data start=0x000000bb end=0x000000ce (size=0x00000013) count: 1
   Custom start=0x000000d4 end=0x00000135 (size=0x00000061) "linking"
   Custom start=0x0000013b end=0x00000155 (size=0x0000001a) "reloc.CODE"
+
+Symbol table:
+
+ 0: F binding=global visible=yes id=2 name=main
+ 1: D binding=local visible=yes id=0 name=.L.str
+ 2: F binding=global visible=yes id=0 name=__linear_memory
+ 3: F binding=local visible=yes id=3 name=.LSomeOtherFunction_bitcast
+ 4: F binding=global visible=yes id=1 name=__indirect_function_table
+
+Relocations:
+
+Relocations for section: 3 [4]
+ R_WASM_MEMORY_ADDR_SLEB offset=0x000004 symbol=1
+ R_WASM_FUNCTION_INDEX_LEB offset=0x00000a symbol=2
+ R_WASM_FUNCTION_INDEX_LEB offset=0x000011 symbol=3
+ R_WASM_FUNCTION_INDEX_LEB offset=0x00001e symbol=4
 ```
