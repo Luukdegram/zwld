@@ -10,6 +10,77 @@ const leb = std.leb;
 const meta = std.meta;
 const log = std.log.scoped(.zwld);
 
+/// Wasm spec version used for this `Object`
+version: u32 = 0,
+/// The entire object file is read and parsed in a single pass.
+/// For this reason it's a lot simpler to use an arena and store the entire
+/// state after parsing. This also allows to free all memory at once.
+arena: std.heap.ArenaAllocator.State = .{},
+/// The file descriptor that represents the wasm object file.
+file: ?std.fs.File = null,
+/// Represents all custom sections
+custom: []const spec.sections.Custom = &.{},
+/// Contains all types (currently only function types)
+types: SectionData(spec.sections.Type) = .{},
+/// Contains all host environment imports for this object
+imports: SectionData(spec.sections.Import) = .{},
+/// A list of all functions (both used and unused)
+functions: SectionData(spec.sections.Func) = .{},
+/// A list of tables, mapping id's
+tables: SectionData(spec.sections.Table) = .{},
+/// All memories that wasm object contains.
+/// This is always at most 1 in the current spec.
+memories: SectionData(spec.sections.Memory) = .{},
+/// A list of globals
+globals: SectionData(spec.sections.Global) = .{},
+/// All functions, globals, etc that are to be exported to
+/// the host environment
+exports: SectionData(spec.sections.Export) = .{},
+/// A list of elements
+elements: SectionData(spec.sections.Element) = .{},
+/// A list of code spec.sections, where each code section
+/// belongs to a function definition.
+code: SectionData(spec.sections.Code) = .{},
+/// A list of data spec.sections, referenced by a memory section.
+/// In the current version of the wasm spec, this is at most 1.
+data: SectionData(spec.sections.Data) = .{},
+/// Represents the function ID that must be called on startup.
+/// This is `null` by default as runtimes may determine the startup
+/// function themselves. This is essentially legacy.
+start: ?spec.indexes.Func = null,
+/// A slice of features that tell the linker what features are mandatory,
+/// used (or therefore missing) and must generate an error when another
+/// object uses features that are not supported by the other.
+features: []const spec.Feature = &.{},
+/// Contains meta data, required for the linker to ensure the correct symbols
+/// are exported. This should never be `null` after parsing.
+link_data: ?spec.LinkMetaData = null,
+/// A table that maps the relocations we must perform where the key represents
+/// the section that the list of relocations applies to.
+relocations: std.AutoArrayHashMapUnmanaged(u32, []const spec.Relocation) = .{},
+
+/// Initializes a new `Object` from a wasm object file.
+pub fn init(gpa: *Allocator, file: std.fs.File) !Object {
+    var object: Object = .{
+        .file = file,
+    };
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+
+    try object.parse(&arena.allocator, file.reader());
+    object.arena = arena.state;
+
+    return object;
+}
+
+/// Frees all memory of `Object` at once. The given `Allocator` must be
+/// the same allocator that was used when `init` was called.
+pub fn deinit(self: *Object, gpa: *Allocator) void {
+    self.arena.promote(gpa).deinit();
+    self.* = undefined;
+}
+
 /// Generic over type `T` that represents a section.
 /// While a section contains its own data structure, each section
 /// is essentially a sequence of that section in a wasm binary, meaning
@@ -56,69 +127,6 @@ pub fn SectionData(comptime T: type) type {
     };
 }
 
-/// Wasm spec version used for this `Object`
-version: u32,
-/// The entire object file is read and parsed in a single pass.
-/// For this reason it's a lot simpler to use an arena and store the entire
-/// state after parsing. This also allows to free all memory at once.
-arena: std.heap.ArenaAllocator.State,
-/// The file descriptor that represents the wasm object file.
-file: std.fs.File,
-/// Represents all custom sections
-custom: []const spec.sections.Custom = &.{},
-/// Contains all types (currently only function types)
-types: SectionData(spec.sections.Type) = .{},
-/// Contains all host environment imports for this object
-imports: SectionData(spec.sections.Import) = .{},
-/// A list of all functions (both used and unused)
-functions: SectionData(spec.sections.Func) = .{},
-/// A list of tables, mapping id's
-tables: SectionData(spec.sections.Table) = .{},
-/// All memories that wasm object contains.
-/// This is always at most 1 in the current spec.
-memories: SectionData(spec.sections.Memory) = .{},
-/// A list of globals
-globals: SectionData(spec.sections.Global) = .{},
-/// All functions, globals, etc that are to be exported to
-/// the host environment
-exports: SectionData(spec.sections.Export) = .{},
-/// A list of elements
-elements: SectionData(spec.sections.Element) = .{},
-/// A list of code spec.sections, where each code section
-/// belongs to a function definition.
-code: SectionData(spec.sections.Code) = .{},
-/// A list of data spec.sections, referenced by a memory section.
-/// In the current version of the wasm spec, this is at most 1.
-data: SectionData(spec.sections.Data) = .{},
-/// Represents the function ID that must be called on startup.
-/// This is `null` by default as runtimes may determine the startup
-/// function themselves. This is essentially 'legacy'.
-start: ?spec.indexes.Func = null,
-/// A slice of features that tell the linker what features are mandatory,
-/// used (or therefore missing) and must generate an error when another
-/// object uses features that are not supported by the other.
-features: []const spec.Feature = &.{},
-/// Contains meta data, required for the linker to ensure the correct symbols
-/// are exported. This should never be `null` after parsing.
-link_data: ?spec.LinkMetaData = null,
-/// A table that maps the relocations we must perform where the key represents
-/// the section that the list of relocations applies to.
-relocations: std.AutoArrayHashMapUnmanaged(u32, []const spec.Relocation) = .{},
-
-/// Initializes a new `Object` from a wasm object file.
-pub fn init(gpa: *Allocator, file: std.fs.File) !Object {
-    var object: Object = undefined;
-    object.file = file;
-
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
-
-    try object.parse(&arena.allocator, file.reader());
-    object.arena = arena.state;
-
-    return object;
-}
-
 /// Error set containing parsing errors.
 /// Merged with reader's errorset by `Parser`
 pub const ParseError = error{
@@ -139,6 +147,15 @@ pub const ParseError = error{
     EndOfStream,
     /// Ran out of memory when allocating.
     OutOfMemory,
+    /// A non-zero flag was provided for comdat info
+    UnexpectedValue,
+    /// An import symbol contains an index to an import that does
+    /// not exist, or no imports were defined.
+    InvalidIndex,
+    /// The section "linking" contains a version that is not supported.
+    UnsupportedVersion,
+    /// When reading the data in leb128 compressed format, its value was overflown.
+    Overflow,
 };
 
 fn parse(self: *Object, gpa: *Allocator, reader: anytype) Parser(@TypeOf(reader)).Error!void {
@@ -146,12 +163,10 @@ fn parse(self: *Object, gpa: *Allocator, reader: anytype) Parser(@TypeOf(reader)
     return parser.parseObject(gpa);
 }
 
-const LebError = error{Overflow};
-
 fn Parser(comptime ReaderType: type) type {
     return struct {
         const Self = @This();
-        const Error = ReaderType.Error || ParseError || LebError;
+        const Error = ReaderType.Error || ParseError;
 
         reader: std.io.CountingReader(ReaderType),
         /// Object file we're building
@@ -182,7 +197,7 @@ fn Parser(comptime ReaderType: type) type {
 
             while (self.reader.reader().readByte()) |byte| {
                 const len = try readLeb(u32, self.reader.reader());
-                var reader = std.io.limitedReader(self.reader.reader(), len).reader();
+                const reader = std.io.limitedReader(self.reader.reader(), len).reader();
 
                 switch (@intToEnum(spec.Section, byte)) {
                     .custom => {
@@ -385,10 +400,10 @@ fn Parser(comptime ReaderType: type) type {
                         self.object.data.end = self.reader.bytes_read;
                         try assertEnd(reader);
                     },
-                    .module => @panic("TODO: Implement 'module' section"),
-                    .instance => @panic("TODO: Implement 'instance' section"),
-                    .alias => @panic("TODO: Implement 'alias' section"),
-                    _ => |id| std.log.scoped(.wasmparser).debug("Found unimplemented section with id '{d}'", .{id}),
+                    else => |id| {
+                        log.info("Found unimplemented section with id '{d}', skipping bytes", .{id});
+                        try reader.skipBytes(reader.context.bytes_left, .{});
+                    },
                 }
             } else |err| switch (err) {
                 error.EndOfStream => {},
@@ -402,11 +417,12 @@ fn Parser(comptime ReaderType: type) type {
         /// to be able to link.
         /// Logs an info message when an undefined feature is detected.
         fn parseFeatures(self: *Self, gpa: *Allocator) !void {
-            for (try readVec(&self.object.features, self.reader, gpa)) |*feature| {
-                const prefix = try leb.readULEB128(u8, self.reader);
-                const name_len = try leb.readULEB128(u32, self.reader);
+            const reader = self.reader.reader();
+            for (try readVec(&self.object.features, reader, gpa)) |*feature| {
+                const prefix = try leb.readULEB128(u8, reader);
+                const name_len = try leb.readULEB128(u32, reader);
                 const name = try gpa.alloc(u8, name_len);
-                try self.reader.readNoEof(name);
+                try reader.readNoEof(name);
 
                 feature.* = .{
                     .prefix = prefix,
@@ -414,7 +430,7 @@ fn Parser(comptime ReaderType: type) type {
                 };
 
                 if (!spec.known_features.has(name)) {
-                    std.log.info("Detected unknown feature: {s}", .{name});
+                    log.info("Detected unknown feature: {s}", .{name});
                 }
             }
         }
@@ -423,19 +439,28 @@ fn Parser(comptime ReaderType: type) type {
         /// The relocations are mapped into `Object` where the key is the section
         /// they apply to.
         fn parseRelocations(self: *Self, gpa: *Allocator) !void {
-            const section = try leb.readULEB128(u32, self.reader);
-            const count = try leb.readULEB128(u32, self.reader);
+            const reader = self.reader.reader();
+            const section = try leb.readULEB128(u32, reader);
+            const count = try leb.readULEB128(u32, reader);
             const relocations = try gpa.alloc(spec.Relocation, count);
 
+            log.info("Found {d} relocations for section index {d}", .{ count, section });
+
             for (relocations) |*relocation| {
-                const rel_type = try leb.readULEB128(u8, self.reader);
+                const rel_type = try leb.readULEB128(u8, reader);
                 const rel_type_enum = @intToEnum(spec.Relocation.Type, rel_type);
                 relocation.* = .{
                     .relocation_type = rel_type_enum,
-                    .offset = try leb.readULEB128(u32, self.reader),
-                    .index = try leb.readULEB128(u32, self.reader),
-                    .addend = if (spec.Relocation.addendIsPresent(rel_type_enum)) try leb.readULEB128(u32, self.reader) else null,
+                    .offset = try leb.readULEB128(u32, reader),
+                    .index = try leb.readULEB128(u32, reader),
+                    .addend = if (rel_type_enum.addendIsPresent()) try leb.readULEB128(u32, reader) else null,
                 };
+                log.info("Found relocation: type({s}) offset({d}) index({d}) addend({d})", .{
+                    @tagName(relocation.relocation_type),
+                    relocation.offset,
+                    relocation.index,
+                    relocation.addend,
+                });
             }
 
             try self.object.relocations.putNoClobber(gpa, section, relocations);
@@ -450,7 +475,7 @@ fn Parser(comptime ReaderType: type) type {
             const limited_reader = limited.reader();
 
             const version = try leb.readULEB128(u32, limited_reader);
-            std.log.info("Link meta data version: {d}", .{version});
+            log.info("Link meta data version: {d}", .{version});
             if (version != 2) return error.UnsupportedVersion;
 
             var subsections = std.ArrayList(spec.Subsection).init(gpa);
@@ -459,6 +484,10 @@ fn Parser(comptime ReaderType: type) type {
                 const subsection = try subsections.addOne();
                 subsection.* = try self.parseSubsection(gpa, limited_reader);
             }
+            self.object.link_data = .{
+                .version = version,
+                .subsections = subsections.toOwnedSlice(),
+            };
         }
 
         /// Parses a `spec.Subsection`.
@@ -467,11 +496,11 @@ fn Parser(comptime ReaderType: type) type {
         ///
         /// `self` is used to provide access to other sections that may be needed,
         /// such as access to the `import` section to find the name of a symbol.
-        fn parseSubsection(self: Self, gpa: *Allocator, reader: anytype) !spec.Subsection {
+        fn parseSubsection(self: *Self, gpa: *Allocator, reader: anytype) !spec.Subsection {
             const sub_type = try leb.readULEB128(u8, reader);
             log.info("Found subsection: {s}", .{@tagName(@intToEnum(spec.Subsection.Type, sub_type))});
             const payload_len = try leb.readULEB128(u32, reader);
-            if (payload_len == 0) return .{ .empty = {} };
+            if (payload_len == 0) return spec.Subsection{ .empty = {} };
             var limited = std.io.limitedReader(reader, payload_len);
             const limited_reader = limited.reader();
 
@@ -482,7 +511,6 @@ fn Parser(comptime ReaderType: type) type {
                 .WASM_SEGMENT_INFO => {
                     const segments = try gpa.alloc(spec.Segment, count);
                     for (segments) |*segment| {
-                        segment.* = try spec.Segment.fromReader(gpa, limited_reader);
                         const name_len = try leb.readULEB128(u32, reader);
                         const name = try gpa.alloc(u8, name_len);
                         try reader.readNoEof(name);
@@ -497,7 +525,7 @@ fn Parser(comptime ReaderType: type) type {
                             segment.flags,
                         });
                     }
-                    return .{ .segment_info = segments };
+                    return spec.Subsection{ .segment_info = segments };
                 },
                 .WASM_INIT_FUNCS => {
                     const funcs = try gpa.alloc(spec.InitFunc, count);
@@ -509,7 +537,7 @@ fn Parser(comptime ReaderType: type) type {
                         log.info("Found function - prio: {d}, index: {d}", .{ func.priority, func.symbol_index });
                     }
 
-                    return .{ .init_funcs = funcs };
+                    return spec.Subsection{ .init_funcs = funcs };
                 },
                 .WASM_COMDAT_INFO => {
                     const comdats = try gpa.alloc(spec.Comdat, count);
@@ -539,7 +567,7 @@ fn Parser(comptime ReaderType: type) type {
                         };
                     }
 
-                    return .{ .comdat_info = comdats };
+                    return spec.Subsection{ .comdat_info = comdats };
                 },
                 .WASM_SYMBOL_TABLE => {
                     const symbols = try gpa.alloc(spec.SymInfo, count);
@@ -553,7 +581,7 @@ fn Parser(comptime ReaderType: type) type {
                         });
                     }
 
-                    return .{ .symbol_table = symbols };
+                    return spec.Subsection{ .symbol_table = symbols };
                 },
             }
         }
@@ -561,7 +589,7 @@ fn Parser(comptime ReaderType: type) type {
         /// Parses the symbol information based on its kind,
         /// requires access to `Object` to find the name of a symbol when it's
         /// an import and flag `WASM_SYM_EXPLICIT_NAME` is not set.
-        fn parseSymbol(self: Self, gpa: *Allocator, reader: anytype) !spec.SymInfo {
+        fn parseSymbol(self: *Self, gpa: *Allocator, reader: anytype) !spec.SymInfo {
             var symbol: spec.SymInfo = undefined;
 
             symbol.kind = @intToEnum(spec.SymInfo.Type, try leb.readULEB128(u8, reader));
@@ -573,9 +601,14 @@ fn Parser(comptime ReaderType: type) type {
                     const name = try gpa.alloc(u8, name_len);
                     try reader.readNoEof(name);
                     symbol.name = name;
-                    symbol.index = try leb.readULEB128(u32, reader);
-                    symbol.offset = try leb.readULEB128(u32, reader);
-                    symbol.size = try leb.readULEB128(u32, reader);
+
+                    // Data symbols only have the following fields if the symbol is defined
+                    if (!symbol.hasFlag(.WASM_SYM_UNDEFINED)) {
+                        symbol.index = try leb.readULEB128(u32, reader);
+                        symbol.offset = try leb.readULEB128(u32, reader);
+                        symbol.size = try leb.readULEB128(u32, reader);
+                        // TODO: Verify offset and size
+                    }
                 },
                 .SYMTAB_SECTION => {
                     symbol.index = try leb.readULEB128(u32, reader);
@@ -592,8 +625,7 @@ fn Parser(comptime ReaderType: type) type {
                         symbol.name = name;
                     } else if (is_import) {
                         // symbol is an import and flag for explicit name is not set
-                        self.object.imports.data[symbol.index];
-                        const import = self.object.imports.atIndex(symbol.index) orelse {
+                        const import = self.object.imports.atIndex(symbol.index.?) orelse {
                             log.info("Import at index {d} does not exist for symbol", .{symbol.index});
                             return error.InvalidIndex;
                         };

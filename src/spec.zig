@@ -290,22 +290,32 @@ pub const Relocation = struct {
         R_WASM_TABLE_INDEX_I64 = 19,
         R_WASM_TABLE_NUMBER_LEB = 20,
         _,
+
+        /// Returns true for relocation types where the `addend` field is present.
+        pub fn addendIsPresent(self: Type) bool {
+            return switch (self) {
+                .R_WASM_MEMORY_ADDR_LEB,
+                .R_WASM_MEMORY_ADDR_SLEB,
+                .R_WASM_MEMORY_ADDR_I32,
+                .R_WASM_MEMORY_ADDR_LEB64,
+                .R_WASM_MEMORY_ADDR_SLEB64,
+                .R_WASM_MEMORY_ADDR_I64,
+                .R_WASM_FUNCTION_OFFSET_I32,
+                .R_WASM_SECTION_OFFSET_I32,
+                => true,
+                else => false,
+            };
+        }
     };
 
-    /// Returns true for relocation types where the `addend` field is present.
-    fn addendIsPresent(reloc_type: Type) bool {
-        return switch (reloc_type) {
-            .R_WASM_MEMORY_ADDR_LEB,
-            .R_WASM_MEMORY_ADDR_SLEB,
-            .R_WASM_MEMORY_ADDR_I32,
-            .R_WASM_MEMORY_ADDR_LEB64,
-            .R_WASM_MEMORY_ADDR_SLEB64,
-            .R_WASM_MEMORY_ADDR_I64,
-            .R_WASM_FUNCTION_OFFSET_I32,
-            .R_WASM_SECTION_OFFSET_I32,
-            => true,
-            else => false,
-        };
+    pub fn format(self: Relocation, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{s} offset=0x{x:0>6} symbol={d}", .{
+            @tagName(self.relocation_type),
+            self.offset,
+            self.index,
+        });
     }
 };
 
@@ -364,9 +374,9 @@ pub const SymInfo = struct {
     /// When `WASM_SYM_UNDEFINED` flag is set, this refers to an import.
     /// Can be `null` when it refers to a data symbol that is undefined.
     index: ?u32 = null,
-    /// Symbol name, can be `null` when index refers to an import and
-    /// `WASM_SYM_EXPLICIT_NAME` is not set.
-    name: ?[]const u8 = null,
+    /// Name of the symbol. When the symbol references to an import, it will
+    /// use the import's name, unless `WASM_SYM_EXPLICIT_NAME` is set.
+    name: []const u8 = &.{},
     /// Offset within the segment. Must be smaller than segment's size, and is only
     /// set when the symbol is defined.
     offset: ?u32 = null,
