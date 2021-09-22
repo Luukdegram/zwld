@@ -106,7 +106,10 @@ pub const indexes = struct {
 pub const sections = struct {
     pub const Custom = struct {
         name: []const u8,
-        data: []const u8,
+        /// For custom sections, data may be null when it represents
+        /// linking metadata, features or relocations as we parse those individually
+        /// into a self-contained type.
+        data: ?[]const u8 = null,
         start: usize,
         end: usize,
 
@@ -304,3 +307,264 @@ pub const SecondaryOpcode = enum(u8) {
 pub const need_secondary = @intToEnum(wasm.Opcode, 0xFC);
 pub const table_get = @intToEnum(wasm.Opcode, 0x25);
 pub const table_set = @intToEnum(wasm.Opcode, 0x26);
+
+pub const Relocation = struct {
+    /// Represents the type of the `Relocation`
+    relocation_type: Type,
+    /// Offset of the value to rewrite relative to the relevant section's contents.
+    /// When `offset` is zero, its position is immediately after the id and size of the section.
+    offset: u32,
+    /// The index of the symbol used.
+    /// When the type is `R_WASM_TYPE_INDEX_LEB`, it represents the index of the type.
+    index: u32,
+    /// Addend to add to the address.
+    /// This field is only non-null for `R_WASM_MEMORY_ADDR_*`, `R_WASM_FUNCTION_OFFSET_I32` and `R_WASM_SECTION_OFFSET_I32`.
+    addend: ?u32,
+
+    /// All possible relocation types currently existing.
+    /// This enum is exhaustive as the spec is WIP and new types
+    /// can be added but we do not want to have this result in compile errors.
+    pub const Type = enum(u8) {
+        R_WASM_FUNCTION_INDEX_LEB = 0,
+        R_WASM_TABLE_INDEX_SLEB = 1,
+        R_WASM_TABLE_INDEX_I32 = 2,
+        R_WASM_MEMORY_ADDR_LEB = 3,
+        R_WASM_MEMORY_ADDR_SLEB = 4,
+        R_WASM_MEMORY_ADDR_I32 = 5,
+        R_WASM_TYPE_INDEX_LEB = 6,
+        R_WASM_GLOBAL_INDEX_LEB = 7,
+        R_WASM_FUNCTION_OFFSET_I32 = 8,
+        R_WASM_SECTION_OFFSET_I32 = 9,
+        R_WASM_EVENT_INDEX_LEB = 10,
+        R_WASM_GLOBAL_INDEX_I32 = 13,
+        R_WASM_MEMORY_ADDR_LEB64 = 14,
+        R_WASM_MEMORY_ADDR_SLEB64 = 15,
+        R_WASM_MEMORY_ADDR_I64 = 16,
+        R_WASM_TABLE_INDEX_SLEB64 = 18,
+        R_WASM_TABLE_INDEX_I64 = 19,
+        R_WASM_TABLE_NUMBER_LEB = 20,
+        _,
+    };
+
+    /// Returns true for relocation types where the `addend` field is present.
+    fn addendIsPresent(reloc_type: Type) bool {
+        return switch (reloc_type) {
+            .R_WASM_MEMORY_ADDR_LEB,
+            .R_WASM_MEMORY_ADDR_SLEB,
+            .R_WASM_MEMORY_ADDR_I32,
+            .R_WASM_MEMORY_ADDR_LEB64,
+            .R_WASM_MEMORY_ADDR_SLEB64,
+            .R_WASM_MEMORY_ADDR_I64,
+            .R_WASM_FUNCTION_OFFSET_I32,
+            .R_WASM_SECTION_OFFSET_I32,
+            => true,
+            else => false,
+        };
+    }
+};
+
+pub const LinkMetaData = struct {
+    /// The version of linking metadata contained in a section.
+    /// The current version is 2. This means we can reject unexpected/unsupported versions.
+    version: u32,
+    /// A sequence of subsections
+    subsections: []const Subsection,
+};
+
+pub const Subsection = union(enum) {
+    segment_info: []const Segment,
+    init_funcs: []const InitFunc,
+    comdat_info: []const Comdat,
+    symbol_table: []const SymInfo,
+    empty: void,
+
+    pub const Type = enum(u8) {
+        WASM_SEGMENT_INFO = 5,
+        WASM_INIT_FUNCS = 6,
+        WASM_COMDAT_INFO = 7,
+        WASM_SYMBOL_TABLE = 8,
+    };
+};
+
+pub const Segment = struct {
+    /// Segment's name, encoded as UTF-8 bytes.
+    name: []const u8,
+    /// The required alignment of the segment, encoded as a power of 2
+    alignment: u32,
+    /// Bitfield containing flags for a segment
+    flags: u32,
+};
+
+pub const InitFunc = struct {
+    /// Priority of the init function
+    priority: u32,
+    /// The symbol index of init function (not the function index).
+    symbol_index: u32,
+};
+
+pub const Comdat = struct {
+    name: []const u8,
+    /// Must be zero, no flags are currently defined by the tool-convention.
+    flags: u32,
+    symbols: []const ComdatSym,
+};
+
+pub const SymInfo = struct {
+    kind: Type,
+    /// Bitfield containings flags for a symbol
+    /// Can contain any of the flags defined in `SymbolFlag`
+    flags: u32,
+    /// The index of the Wasm object corresponding to the symbol.
+    /// When `WASM_SYM_UNDEFINED` flag is set, this refers to an import.
+    /// Can be `null` when it refers to a data symbol that is undefined.
+    index: ?u32 = null,
+    /// Symbol name, can be `null` when index refers to an import and
+    /// `WASM_SYM_EXPLICIT_NAME` is not set.
+    name: ?[]const u8 = null,
+    /// Offset within the segment. Must be smaller than segment's size, and is only
+    /// set when the symbol is defined.
+    offset: ?u32 = null,
+    /// Set when the symbol is defined, can be zero and must be smaller than segment's
+    /// size where offset + size.
+    size: ?u32 = null,
+
+    pub fn hasFlag(self: SymInfo, flag: SymbolFlag) bool {
+        return self.flags & @enumToInt(flag) != 0;
+    }
+
+    pub fn setFlag(self: *SymInfo, flag: SymbolFlag) void {
+        self.flags |= @enumToInt(flag);
+    }
+
+    pub const Type = enum(u8) {
+        SYMTAB_FUNCTION = 0,
+        SYMTAB_DATA = 1,
+        SYMTAB_GLOBAL = 2,
+        SYMTAB_SECTION = 3,
+        SYMTAB_EVENT = 4,
+        SYMTAB_TABLE = 5,
+    };
+
+    pub fn fromReader(gpa: *Allocator, reader: anytype) !SymInfo {
+        var symbol: SymInfo = undefined;
+
+        symbol.kind = @intToEnum(Type, try leb.readULEB128(u8, reader));
+        symbol.flags = try leb.readULEB128(u32, reader);
+
+        switch (symbol.kind) {
+            .SYMTAB_DATA => {
+                const name_len = try leb.readULEB128(u32, reader);
+                const name = try gpa.alloc(u8, name_len);
+                errdefer gpa.free(name);
+                try reader.readNoEof(name);
+                symbol.name = name;
+                symbol.index = try leb.readULEB128(u32, reader);
+                symbol.offset = try leb.readULEB128(u32, reader);
+                symbol.size = try leb.readULEB128(u32, reader);
+            },
+            .SYMTAB_SECTION => {
+                symbol.index = try leb.readULEB128(u32, reader);
+            },
+            else => {
+                symbol.index = try leb.readULEB128(u32, reader);
+
+                const is_import = symbol.hasFlag(.WASM_SYM_UNDEFINED);
+                const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
+                if (!(is_import and !explicit_name)) {
+                    const name_len = try leb.readULEB128(u32, reader);
+                    const name = try gpa.alloc(u8, name_len);
+                    errdefer gpa.free(name);
+                    try reader.readNoEof(name);
+                    symbol.name = name;
+                }
+            },
+        }
+        return symbol;
+    }
+
+    /// Formats the symbol into human-readable text
+    pub fn format(self: SymInfo, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+
+        const kind_fmt: u8 = switch (self.kind) {
+            .SYMTAB_FUNCTION => 'F',
+            .SYMTAB_DATA => 'D',
+            .SYMTAB_GLOBAL => 'G',
+            .SYMTAB_SECTION => 'S',
+            .SYMTAB_EVENT => 'E',
+            .SYMTAB_TABLE => 'T',
+        };
+        const visible: []const u8 = if (self.hasFlag(.WASM_SYM_VISIBILITY_HIDDEN)) "no" else "yes";
+        const binding: []const u8 = if (self.hasFlag(.WASM_SYM_BINDING_LOCAL)) "local" else "global";
+
+        try writer.print(
+            "{c} binding={s} visible={s} id={d} name={s}",
+            .{ kind_fmt, binding, visible, self.index, self.name },
+        );
+    }
+};
+
+pub const SymbolFlag = enum(u32) {
+    /// Indicates a weak symbol.
+    /// When linking multiple modules defining the same symbol, all weak definitions are discarded
+    /// in favourite of the strong definition. When no strong definition exists, all weak but one definiton is discarded.
+    /// If multiple definitions remain, we get an error: symbol collision.
+    WASM_SYM_BINDING_WEAK = 1,
+    /// Indicates a local, non-exported, non-module-linked symbol.
+    /// The names of local symbols are not required to be unique, unlike non-local symbols.
+    WASM_SYM_BINDING_LOCAL = 2,
+    /// Indicates a hidden symbol. Hidden symbols will not be exported to the link result, but may
+    /// link to other modules.
+    WASM_SYM_VISIBILITY_HIDDEN = 4,
+    /// Indicates an undefined symbol. For non-data symbols, this must match whether the symbol is
+    /// an import or is defined. For data symbols however, determines whether a segment is specified.
+    WASM_SYM_UNDEFINED = 0x10,
+    /// Indicates a symbol of which its intention is to be exported from the wasm module to the host environment.
+    /// This differs from the visibility flag as this flag affects the static linker.
+    WASM_SYM_EXPORTED = 0x20,
+    /// Indicates the symbol uses an explicit symbol name, rather than reusing the name from a wasm import.
+    /// Allows remapping imports from foreign WASM modules into local symbols with a different name.
+    WASM_SYM_EXPLICIT_NAME = 0x40,
+    /// Indicates the symbol is to be included in the linker output, regardless of whether it is used or has any references to it.
+    WASM_SYM_NO_STRIP = 0x80,
+};
+
+pub const ComdatSym = struct {
+    kind: Type,
+    /// Index of the data segment/function/global/event/table within a WASM module.
+    /// The object must not be an import.
+    index: u32,
+
+    pub const Type = enum(u8) {
+        WASM_COMDAT_DATA = 0,
+        WASM_COMDAT_FUNCTION = 1,
+        WASM_COMDAT_GLOBAL = 2,
+        WASM_COMDAT_EVENT = 3,
+        WASM_COMDAT_TABLE = 4,
+        WASM_COMDAT_SECTION = 5,
+    };
+};
+
+pub const Feature = struct {
+    /// Provides information about the usage of the feature.
+    /// - '0x2b' (+): Object uses this feature, and the link fails if feature is not in the allowed set.
+    /// - '0x2d' (-): Object does not use this feature, and the link fails if this feature is in the allowed set.
+    /// - '0x3d' (=): Object uses this feature, and the link fails if this feature is not in the allowed set,
+    /// or if any object does not use this feature.
+    prefix: u8,
+    /// name of the feature, must be unique in the sequence of features.
+    name: []const u8,
+};
+
+pub const known_features = std.ComptimeStringMap(void, .{
+    .{"atomics"},
+    .{"bulk-memory"},
+    .{"exception-handling"},
+    .{"multivalue"},
+    .{"mutable-globals"},
+    .{"nontrapping-fptoint"},
+    .{"sign-ext"},
+    .{"simd128"},
+    .{"tail-call"},
+});
