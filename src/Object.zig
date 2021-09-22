@@ -8,6 +8,7 @@ const spec = @import("spec.zig");
 const Allocator = std.mem.Allocator;
 const leb = std.leb;
 const meta = std.meta;
+const log = std.log.scoped(.zwld);
 
 /// Generic over type `T` that represents a section.
 /// While a section contains its own data structure, each section
@@ -40,8 +41,17 @@ pub fn SectionData(comptime T: type) type {
             });
         }
 
+        /// Returns true when the section is empty (read: non-existant)
         pub fn isEmpty(self: Self) bool {
             return self.data.len == 0;
+        }
+
+        /// From a given index, attempts to retrieve the value within the `data` slice
+        /// at that index. When `data` is empty, or the given index exceeds its bounds,
+        /// returns `null`.
+        pub fn atIndex(self: Self, idx: usize) ?T {
+            if (idx >= self.data.len - 1) return null;
+            return self.data[idx];
         }
     };
 }
@@ -84,6 +94,16 @@ data: SectionData(spec.sections.Data) = .{},
 /// This is `null` by default as runtimes may determine the startup
 /// function themselves. This is essentially 'legacy'.
 start: ?spec.indexes.Func = null,
+/// A slice of features that tell the linker what features are mandatory,
+/// used (or therefore missing) and must generate an error when another
+/// object uses features that are not supported by the other.
+features: []const spec.Feature = &.{},
+/// Contains meta data, required for the linker to ensure the correct symbols
+/// are exported. This should never be `null` after parsing.
+link_data: ?spec.LinkMetaData = null,
+/// A table that maps the relocations we must perform where the key represents
+/// the section that the list of relocations applies to.
+relocations: std.AutoArrayHashMapUnmanaged(u32, []const spec.Relocation) = .{},
 
 /// Initializes a new `Object` from a wasm object file.
 pub fn init(gpa: *Allocator, file: std.fs.File) !Object {
@@ -361,6 +381,213 @@ fn Parser(comptime ReaderType: type) type {
                 else => |e| return e,
             }
             self.object.custom = custom_sections.toOwnedSlice();
+        }
+
+        /// Based on the "features" custom section, parses it into a list of
+        /// features that tell the linker what features were enabled and may be mandatory
+        /// to be able to link.
+        /// Logs an info message when an undefined feature is detected.
+        fn parseFeatures(self: *Self, gpa: *Allocator) !void {
+            for (try readVec(&self.object.features, self.reader, gpa)) |*feature| {
+                const prefix = try leb.readULEB128(u8, self.reader);
+                const name_len = try leb.readULEB128(u32, self.reader);
+                const name = try gpa.alloc(u8, name_len);
+                try self.reader.readNoEof(name);
+
+                feature.* = .{
+                    .prefix = prefix,
+                    .name = name,
+                };
+
+                if (!spec.known_features.has(name)) {
+                    std.log.info("Detected unknown feature: {s}", .{name});
+                }
+            }
+        }
+
+        /// Parses a "reloc" custom section into a list of relocations.
+        /// The relocations are mapped into `Object` where the key is the section
+        /// they apply to.
+        fn parseRelocations(self: *Self, gpa: *Allocator) !void {
+            const section = try leb.readULEB128(u32, self.reader);
+            const count = try leb.readULEB128(u32, self.reader);
+            const relocations = try gpa.alloc(spec.Relocation, count);
+
+            for (relocations) |*relocation| {
+                const rel_type = try leb.readULEB128(u8, self.reader);
+                const rel_type_enum = @intToEnum(spec.Relocation.Type, rel_type);
+                relocation.* = .{
+                    .relocation_type = rel_type_enum,
+                    .offset = try leb.readULEB128(u32, self.reader),
+                    .index = try leb.readULEB128(u32, self.reader),
+                    .addend = if (spec.Relocation.addendIsPresent(rel_type_enum)) try leb.readULEB128(u32, self.reader) else null,
+                };
+            }
+
+            try self.object.relocations.putNoClobber(gpa, section, relocations);
+        }
+
+        /// Parses the "linking" custom section. Versions that are not
+        /// supported will be an error. `payload_size` is required to be able
+        /// to calculate the subsections we need to parse, as that data is not
+        /// available within the section itself.
+        fn parseMetadata(self: *Self, gpa: *Allocator, payload_size: usize) !void {
+            var limited = std.io.limitedReader(self.reader, payload_size);
+            const limited_reader = limited.reader();
+
+            const version = try leb.readULEB128(u32, limited_reader);
+            std.log.info("Link meta data version: {d}", .{version});
+            if (version != 2) return error.UnsupportedVersion;
+
+            var subsections = std.ArrayList(spec.Subsection).init(gpa);
+
+            while (limited.bytes_left > 0) {
+                const subsection = try subsections.addOne();
+                subsection.* = try self.parseSubsection(gpa, limited_reader);
+            }
+        }
+
+        /// Parses a `spec.Subsection`.
+        /// The `reader` param for this is to provide a `LimitedReader`, which allows
+        /// us to only read until a max length.
+        ///
+        /// `self` is used to provide access to other sections that may be needed,
+        /// such as access to the `import` section to find the name of a symbol.
+        fn parseSubsection(self: Self, gpa: *Allocator, reader: anytype) !spec.Subsection {
+            const sub_type = try leb.readULEB128(u8, reader);
+            log.info("Found subsection: {s}", .{@tagName(@intToEnum(spec.Subsection.Type, sub_type))});
+            const payload_len = try leb.readULEB128(u32, reader);
+            if (payload_len == 0) return .{ .empty = {} };
+            var limited = std.io.limitedReader(reader, payload_len);
+            const limited_reader = limited.reader();
+
+            // every subsection contains a 'count' field
+            const count = try leb.readULEB128(u32, limited_reader);
+
+            switch (@intToEnum(spec.Subsection.Type, sub_type)) {
+                .WASM_SEGMENT_INFO => {
+                    const segments = try gpa.alloc(spec.Segment, count);
+                    for (segments) |*segment| {
+                        segment.* = try spec.Segment.fromReader(gpa, limited_reader);
+                        const name_len = try leb.readULEB128(u32, reader);
+                        const name = try gpa.alloc(u8, name_len);
+                        try reader.readNoEof(name);
+                        segment.* = .{
+                            .name = name,
+                            .alignment = try leb.readULEB128(u32, reader),
+                            .flags = try leb.readULEB128(u32, reader),
+                        };
+                        log.info("Found segment: {s} align({d}) flags({b})", .{
+                            segment.name,
+                            segment.alignment,
+                            segment.flags,
+                        });
+                    }
+                    return .{ .segment_info = segments };
+                },
+                .WASM_INIT_FUNCS => {
+                    const funcs = try gpa.alloc(spec.InitFunc, count);
+                    for (funcs) |*func| {
+                        func.* = .{
+                            .priority = try leb.readULEB128(u32, reader),
+                            .symbol_index = try leb.readULEB128(u32, reader),
+                        };
+                        log.info("Found function - prio: {d}, index: {d}", .{ func.priority, func.symbol_index });
+                    }
+
+                    return .{ .init_funcs = funcs };
+                },
+                .WASM_COMDAT_INFO => {
+                    const comdats = try gpa.alloc(spec.Comdat, count);
+                    for (comdats) |*comdat| {
+                        const name_len = try leb.readULEB128(u32, reader);
+                        const name = try gpa.alloc(u8, name_len);
+                        try reader.readNoEof(name);
+
+                        const flags = try leb.readULEB128(u32, reader);
+                        if (flags != 0) {
+                            return error.UnexpectedValue;
+                        }
+
+                        const symbol_count = try leb.readULEB128(u32, reader);
+                        const symbols = try gpa.alloc(spec.ComdatSym, symbol_count);
+                        for (symbols) |*symbol| {
+                            symbol.* = .{
+                                .kind = @intToEnum(spec.ComdatSym.Type, try leb.readULEB128(u8, reader)),
+                                .index = try leb.readULEB128(u32, reader),
+                            };
+                        }
+
+                        comdat.* = .{
+                            .name = name,
+                            .flags = flags,
+                            .symbols = symbols,
+                        };
+                    }
+
+                    return .{ .comdat_info = comdats };
+                },
+                .WASM_SYMBOL_TABLE => {
+                    const symbols = try gpa.alloc(spec.SymInfo, count);
+                    for (symbols) |*symbol| {
+                        symbol.* = try self.parseSymbol(gpa, reader);
+
+                        log.info("Found symbol: type({s}) name({s}) flags(0x{x})", .{
+                            @tagName(symbol.kind),
+                            symbol.name,
+                            symbol.flags,
+                        });
+                    }
+
+                    return .{ .symbol_table = symbols };
+                },
+            }
+        }
+
+        /// Parses the symbol information based on its kind,
+        /// requires access to `Object` to find the name of a symbol when it's
+        /// an import and flag `WASM_SYM_EXPLICIT_NAME` is not set.
+        fn parseSymbol(self: Self, gpa: *Allocator, reader: anytype) !spec.SymInfo {
+            var symbol: spec.SymInfo = undefined;
+
+            symbol.kind = @intToEnum(spec.SymInfo.Type, try leb.readULEB128(u8, reader));
+            symbol.flags = try leb.readULEB128(u32, reader);
+
+            switch (symbol.kind) {
+                .SYMTAB_DATA => {
+                    const name_len = try leb.readULEB128(u32, reader);
+                    const name = try gpa.alloc(u8, name_len);
+                    try reader.readNoEof(name);
+                    symbol.name = name;
+                    symbol.index = try leb.readULEB128(u32, reader);
+                    symbol.offset = try leb.readULEB128(u32, reader);
+                    symbol.size = try leb.readULEB128(u32, reader);
+                },
+                .SYMTAB_SECTION => {
+                    symbol.index = try leb.readULEB128(u32, reader);
+                },
+                else => {
+                    symbol.index = try leb.readULEB128(u32, reader);
+
+                    const is_import = symbol.hasFlag(.WASM_SYM_UNDEFINED);
+                    const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
+                    if (!(is_import and !explicit_name)) {
+                        const name_len = try leb.readULEB128(u32, reader);
+                        const name = try gpa.alloc(u8, name_len);
+                        try reader.readNoEof(name);
+                        symbol.name = name;
+                    } else if (is_import) {
+                        // symbol is an import and flag for explicit name is not set
+                        self.object.imports.data[symbol.index];
+                        const import = self.object.imports.atIndex(symbol.index) orelse {
+                            log.info("Import at index {d} does not exist for symbol", .{symbol.index});
+                            return error.InvalidIndex;
+                        };
+                        symbol.name = try gpa.dupe(u8, import.name);
+                    }
+                },
+            }
+            return symbol;
         }
     };
 }
