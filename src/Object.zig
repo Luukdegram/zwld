@@ -192,8 +192,22 @@ fn Parser(comptime ReaderType: type) type {
                         const name = try gpa.alloc(u8, name_len);
                         try reader.readNoEof(name);
 
-                        const data = try gpa.alloc(u8, reader.context.bytes_left);
-                        try reader.readNoEof(data);
+                        const data: ?[]const u8 = blk: {
+                            if (std.mem.eql(u8, name, "linking")) {
+                                try self.parseMetadata(gpa, reader.context.bytes_left);
+                                break :blk null;
+                            } else if (std.mem.startsWith(u8, name, "reloc")) {
+                                try self.parseRelocations(gpa);
+                                break :blk null;
+                            } else if (std.mem.eql(u8, name, "target_features")) {
+                                try self.parseFeatures(gpa);
+                                break :blk null;
+                            }
+
+                            const data = try gpa.alloc(u8, reader.context.bytes_left);
+                            try reader.readNoEof(data);
+                            break :blk data;
+                        };
 
                         custom.* = .{ .name = name, .data = data, .start = start, .end = self.reader.bytes_read };
                     },
