@@ -197,60 +197,6 @@ pub const sections = struct {
     };
 };
 
-/// Represents a wasm module, containing the version
-/// of the wasm spec it complies with, and access to all of its
-/// sections.
-pub const Module = struct {
-    custom: []const sections.Custom = &.{},
-    types: SectionData(sections.Type) = .{},
-    imports: SectionData(sections.Import) = .{},
-    functions: SectionData(sections.Func) = .{},
-    tables: SectionData(sections.Table) = .{},
-    memories: SectionData(sections.Memory) = .{},
-    globals: SectionData(sections.Global) = .{},
-    exports: SectionData(sections.Export) = .{},
-    elements: SectionData(sections.Element) = .{},
-    code: SectionData(sections.Code) = .{},
-    data: SectionData(sections.Data) = .{},
-    start: ?indexes.Func = null,
-    version: u32,
-
-    /// Returns a custom section by its name.
-    /// Will return `null` when the custom section of a given `name` does not exist.
-    pub fn customByName(self: Module, name: []const u8) ?sections.Custom {
-        return for (self.custom) |custom| {
-            if (std.mem.eql(u8, custom.name, name)) break custom;
-        } else null;
-    }
-};
-
-pub fn SectionData(comptime T: type) type {
-    return struct {
-        data: []const T = &.{},
-        start: usize = 0,
-        end: usize = 0,
-
-        /// Formats the `SectionData` for debug purposes
-        pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            _ = options;
-            _ = fmt;
-            const type_name = comptime blk: {
-                var name: [@typeName(T).len]u8 = undefined;
-                std.mem.copy(u8, &name, @typeName(T));
-                name[0] = std.ascii.toUpper(name[0]);
-                break :blk name;
-            };
-            try writer.print("{s: >8} start=0x{x:0>8} end=0x{x:0>8} (size=0x{x:0>8}) count: {d}", .{
-                type_name,
-                self.start,
-                self.end,
-                self.end - self.start,
-                self.data.len,
-            });
-        }
-    };
-}
-
 pub const Instruction = struct {
     opcode: wasm.Opcode,
     secondary: ?SecondaryOpcode = null,
@@ -444,43 +390,6 @@ pub const SymInfo = struct {
         SYMTAB_EVENT = 4,
         SYMTAB_TABLE = 5,
     };
-
-    pub fn fromReader(gpa: *Allocator, reader: anytype) !SymInfo {
-        var symbol: SymInfo = undefined;
-
-        symbol.kind = @intToEnum(Type, try leb.readULEB128(u8, reader));
-        symbol.flags = try leb.readULEB128(u32, reader);
-
-        switch (symbol.kind) {
-            .SYMTAB_DATA => {
-                const name_len = try leb.readULEB128(u32, reader);
-                const name = try gpa.alloc(u8, name_len);
-                errdefer gpa.free(name);
-                try reader.readNoEof(name);
-                symbol.name = name;
-                symbol.index = try leb.readULEB128(u32, reader);
-                symbol.offset = try leb.readULEB128(u32, reader);
-                symbol.size = try leb.readULEB128(u32, reader);
-            },
-            .SYMTAB_SECTION => {
-                symbol.index = try leb.readULEB128(u32, reader);
-            },
-            else => {
-                symbol.index = try leb.readULEB128(u32, reader);
-
-                const is_import = symbol.hasFlag(.WASM_SYM_UNDEFINED);
-                const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
-                if (!(is_import and !explicit_name)) {
-                    const name_len = try leb.readULEB128(u32, reader);
-                    const name = try gpa.alloc(u8, name_len);
-                    errdefer gpa.free(name);
-                    try reader.readNoEof(name);
-                    symbol.name = name;
-                }
-            },
-        }
-        return symbol;
-    }
 
     /// Formats the symbol into human-readable text
     pub fn format(self: SymInfo, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
