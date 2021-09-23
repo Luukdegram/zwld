@@ -50,15 +50,12 @@ fn MergedEnum(comptime T: type, comptime fields: []const TypeInfo.EnumField) typ
         @compileError("Given type 'T' must be an enum type but instead was given: " ++ @typeName(T));
     }
 
-    const old_fields = std.meta.fields(T);
-    var new_fields: [fields.len + old_fields.len]TypeInfo.EnumField = undefined;
-    std.mem.copy(TypeInfo.EnumField, &new_fields, old_fields);
-    std.mem.copy(TypeInfo.EnumField, new_fields[old_fields.len..], fields);
+    const new_fields = std.meta.fields(T) ++ fields;
 
     return @Type(.{ .Enum = .{
         .layout = .Auto,
         .tag_type = u8,
-        .fields = &new_fields,
+        .fields = new_fields,
         .decls = &.{},
         .is_exhaustive = false,
     } });
