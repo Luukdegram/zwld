@@ -394,8 +394,8 @@ fn Parser(comptime ReaderType: type) type {
 
                             const init_len = try readLeb(u32, reader);
                             const init_data = try gpa.alloc(u8, init_len);
-                            data.data = init_data;
                             try reader.readNoEof(init_data);
+                            data.data = init_data;
                         }
                         self.object.data.end = self.reader.bytes_read;
                         try assertEnd(reader);
