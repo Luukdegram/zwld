@@ -21,6 +21,8 @@ funcs: std.ArrayListUnmanaged(spec.sections.Func) = .{},
 /// is immutable, we can still modify the individual bytes within a singular code section.
 /// This allows us to perform relocations inside the code section before flushing.
 code: std.ArrayListUnmanaged([]u8) = .{},
+/// Merged table sections in non-binary form
+tables: std.ArrayListUnmanaged(spec.sections.Table) = .{},
 /// A table where the key is the file index (the same index into `objects`),
 /// and the value is list where each element contains a section kind and its new index.
 section_resolver: std.AutoHashMapUnmanaged(u8, Reindex) = .{},
@@ -78,6 +80,7 @@ pub fn addObjects(self: *Wasm, file_paths: []const []const u8) !void {
 pub fn flush(self: *Wasm) !void {
     try self.mergeGlobals();
     try self.mergeFunctions();
+    try self.mergeTables();
 }
 
 /// Merges all function and code sections into the final binary.
@@ -122,6 +125,21 @@ fn mergeGlobals(self: *Wasm) !void {
             const new_idx = @intCast(u32, self.globals.items.len);
             try self.globals.append(self.gpa, global);
             try self.appendReindex(file_index, .global, global_index, new_idx);
+        }
+    }
+}
+
+/// Merges the table sections of all object files into the final binary
+/// This will however not perform any relocations
+fn mergeTables(self: *Wasm) !void {
+    for (self.objects.items) |object, file_index| {
+        const table_section = object.tables;
+        if (table_section.isEmpty()) continue;
+
+        for (table_section.data) |table, table_index| {
+            const new_idx = @intCast(u32, self.tables.items.len);
+            try self.tables.append(self.gpa, table);
+            try self.appendReindex(file_index, .table, table_index, new_idx);
         }
     }
 }
