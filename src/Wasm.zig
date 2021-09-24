@@ -71,6 +71,10 @@ pub fn addObjects(self: *Wasm, file_paths: []const []const u8) !void {
         errdefer file.close();
         var object = try Object.init(self.gpa, file);
         errdefer object.deinit(self.gpa);
+        if (object.link_data == null) {
+            log.crit("Object file {s} missing \"linking\" section", .{path});
+            return error.MissingLinkingSection;
+        }
         try self.objects.append(self.gpa, object);
     }
 }
