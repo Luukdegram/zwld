@@ -124,6 +124,11 @@ pub fn SectionData(comptime T: type) type {
             if (idx >= self.data.len - 1) return null;
             return self.data[idx];
         }
+
+        /// Returns the amount of segments in a given section
+        pub fn count(self: Self) usize {
+            return self.data.len;
+        }
     };
 }
 
@@ -190,12 +195,17 @@ fn Parser(comptime ReaderType: type) type {
 
             self.object.version = version;
 
+            // represents the index of a section.
+            // Whenever we find a section we increase this by 1.
+            var index: u32 = 0;
+
             // custom sections do not provide a count, as they are each their very own
             // section that simply share the same section ID. For this reason we use
             // an arraylist so we can append them individually.
             var custom_sections = std.ArrayList(spec.sections.Custom).init(gpa);
 
             while (self.reader.reader().readByte()) |byte| {
+                defer index += 1;
                 const len = try readLeb(u32, self.reader.reader());
                 const reader = std.io.limitedReader(self.reader.reader(), len).reader();
 
@@ -227,6 +237,7 @@ fn Parser(comptime ReaderType: type) type {
                         custom.* = .{ .name = name, .data = data, .start = start, .end = self.reader.bytes_read };
                     },
                     .type => {
+                        self.object.types.id = index;
                         self.object.types.start = self.reader.bytes_read;
                         for (try readVec(&self.object.types.data, reader, gpa)) |*type_val| {
                             if ((try reader.readByte()) != std.wasm.function_type) return error.ExpectedFuncType;
@@ -243,6 +254,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .import => {
+                        self.object.imports.id = index;
                         self.object.imports.start = self.reader.bytes_read;
                         for (try readVec(&self.object.imports.data, reader, gpa)) |*import| {
                             const module_len = try readLeb(u32, reader);
@@ -273,6 +285,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .function => {
+                        self.object.functions.id = index;
                         self.object.functions.start = self.reader.bytes_read;
                         for (try readVec(&self.object.functions.data, reader, gpa)) |*func| {
                             func.type_idx = try readEnum(spec.indexes.Type, reader);
@@ -281,6 +294,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .table => {
+                        self.object.tables.id = index;
                         self.object.tables.start = self.reader.bytes_read;
                         for (try readVec(&self.object.tables.data, reader, gpa)) |*table| {
                             table.* = .{
@@ -292,6 +306,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .memory => {
+                        self.object.memories.id = index;
                         self.object.memories.start = self.reader.bytes_read;
                         for (try readVec(&self.object.memories.data, reader, gpa)) |*memory| {
                             memory.* = .{ .limits = try readLimits(reader) };
@@ -300,6 +315,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .global => {
+                        self.object.globals.id = index;
                         self.object.globals.start = self.reader.bytes_read;
                         for (try readVec(&self.object.globals.data, reader, gpa)) |*global| {
                             global.* = .{
@@ -312,6 +328,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .@"export" => {
+                        self.object.exports.id = index;
                         self.object.exports.start = self.reader.bytes_read;
                         for (try readVec(&self.object.exports.data, reader, gpa)) |*exp| {
                             const name_len = try readLeb(u32, reader);
@@ -331,6 +348,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .element => {
+                        self.object.elements.id = index;
                         self.object.elements.start = self.reader.bytes_read;
                         for (try readVec(&self.object.elements.data, reader, gpa)) |*elem| {
                             elem.table_idx = try readEnum(spec.indexes.Table, reader);
@@ -344,49 +362,54 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .code => {
+                        self.object.code.id = index;
                         self.object.code.start = self.reader.bytes_read;
                         for (try readVec(&self.object.code.data, reader, gpa)) |*code| {
                             const body_len = try readLeb(u32, reader);
+                            const data = try gpa.alloc(u8, body_len);
+                            try reader.readNoEof(data);
+                            code.* = .{ .data = data };
 
-                            var code_reader = std.io.limitedReader(reader, body_len).reader();
+                            // var code_reader = std.io.limitedReader(reader, body_len).reader();
 
-                            // first parse the local declarations
-                            {
-                                const locals_len = try readLeb(u32, code_reader);
-                                const locals = try gpa.alloc(spec.sections.Code.Local, locals_len);
-                                for (locals) |*local| {
-                                    local.* = .{
-                                        .count = try readLeb(u32, code_reader),
-                                        .valtype = try readEnum(spec.ValueType, code_reader),
-                                    };
-                                }
+                            // // first parse the local declarations
+                            // {
+                            //     const locals_len = try readLeb(u32, code_reader);
+                            //     const locals = try gpa.alloc(spec.sections.Code.Local, locals_len);
+                            //     for (locals) |*local| {
+                            //         local.* = .{
+                            //             .count = try readLeb(u32, code_reader),
+                            //             .valtype = try readEnum(spec.ValueType, code_reader),
+                            //         };
+                            //     }
 
-                                code.locals = locals;
-                            }
+                            //     code.locals = locals;
+                            // }
 
-                            {
-                                var instructions = std.ArrayList(spec.Instruction).init(gpa);
-                                defer instructions.deinit();
+                            // {
+                            //     var instructions = std.ArrayList(spec.Instruction).init(gpa);
+                            //     defer instructions.deinit();
 
-                                while (readEnum(std.wasm.Opcode, code_reader)) |opcode| {
-                                    const instr = try buildInstruction(opcode, gpa, code_reader);
-                                    try instructions.append(instr);
-                                } else |err| switch (err) {
-                                    error.EndOfStream => {
-                                        const maybe_end = instructions.popOrNull() orelse return error.MissingEndForBody;
-                                        if (maybe_end.opcode != .end) return error.MissingEndForBody;
-                                    },
-                                    else => |e| return e,
-                                }
+                            //     while (readEnum(std.wasm.Opcode, code_reader)) |opcode| {
+                            //         const instr = try buildInstruction(opcode, gpa, code_reader);
+                            //         try instructions.append(instr);
+                            //     } else |err| switch (err) {
+                            //         error.EndOfStream => {
+                            //             const maybe_end = instructions.popOrNull() orelse return error.MissingEndForBody;
+                            //             if (maybe_end.opcode != .end) return error.MissingEndForBody;
+                            //         },
+                            //         else => |e| return e,
+                            //     }
 
-                                code.body = instructions.toOwnedSlice();
-                            }
-                            try assertEnd(code_reader);
+                            //     code.body = instructions.toOwnedSlice();
+                            // }
+                            // try assertEnd(code_reader);
                         }
                         self.object.code.end = self.reader.bytes_read;
                         try assertEnd(reader);
                     },
                     .data => {
+                        self.object.data.id = index;
                         self.object.data.start = self.reader.bytes_read;
                         for (try readVec(&self.object.data.data, reader, gpa)) |*data| {
                             data.index = try readEnum(spec.indexes.Mem, reader);
@@ -401,7 +424,10 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     else => |id| {
-                        log.info("Found unimplemented section with id '{d}', skipping bytes", .{id});
+                        log.info("Found unimplemented section with id '{d}' at index {d}, skipping bytes", .{
+                            @enumToInt(id),
+                            index,
+                        });
                         try reader.skipBytes(reader.context.bytes_left, .{});
                     },
                 }

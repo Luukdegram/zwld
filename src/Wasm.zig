@@ -6,6 +6,7 @@ const Object = @import("Object.zig");
 const spec = @import("spec.zig");
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
+const log = std.log.scoped(.zwld);
 
 gpa: *Allocator,
 /// The binary file that we will write the final binary data to
@@ -16,6 +17,21 @@ objects: std.ArrayListUnmanaged(Object) = .{},
 globals: std.ArrayListUnmanaged(spec.sections.Global) = .{},
 /// Merged function sections are appended to this list
 funcs: std.ArrayListUnmanaged(spec.sections.Func) = .{},
+/// Contains all the code sections. While the slice of code sections
+/// is immutable, we can still modify the individual bytes within a singular code section.
+/// This allows us to perform relocations inside the code section before flushing.
+code: std.ArrayListUnmanaged([]u8) = .{},
+/// A table where the key is the file index (the same index into `objects`),
+/// and the value is list where each element contains a section kind and its new index.
+section_resolver: std.AutoHashMapUnmanaged(u8, Reindex) = .{},
+
+/// A slice of sections with their new index.
+/// To be used with a section resolved where the key is the file index.
+const Reindex = std.ArrayListUnmanaged(struct {
+    section_type: spec.Section,
+    new_index: u32,
+    old_index: u32,
+});
 
 /// Initializes a new wasm binary file at the given path.
 /// Will overwrite any existing file at said path.
@@ -65,13 +81,54 @@ pub fn flush(self: *Wasm) !void {
 
 /// Merges all function sections into the final binary, and patches 
 fn mergeFunctions(self: *Wasm) !void {
-    for (self.objects.items) |object| {
+    for (self.objects.items) |object, file_index| {
         const func_sections: Object.SectionData(spec.sections.Func) = object.funcs;
         if (func_sections.isEmpty()) continue;
 
-        for (func_sections) |func| {
-            const id = @intCast(u32, self.funcs.items.len);
+        for (func_sections.data) |func, func_index| {
+            const new_idx = @intCast(u32, self.funcs.items.len);
             try self.funcs.append(self.gpa, func);
+            try self.appendReindex(file_index, .func, func_index, new_idx);
+        }
+
+        // as each function section also contains a code section,
+        // we're free to merge those as well
+        const code_sections = object.code;
+        if (code_sections.count() != func_sections.count()) {
+            log.crit("Code sections do not match function sections count: {d} vs {d}", .{
+                code_sections.count(),
+                func_sections.count(),
+            });
+            return error.MismatchingSectionCount;
+        }
+        for (code_sections.data) |code, code_index| {
+            const new_idx = @intCast(u32, self.code.items.len);
+            try self.code.append(self.gpa, code);
+            try self.appendReindex(file_index, .code, code_index, new_idx);
         }
     }
+}
+
+/// Appends a new reindex into `section_resolver`
+fn appendReindex(self: *Wasm, file_index: usize, section_type: spec.Section, old_index: usize, new_index: usize) !void {
+    const result = try self.section_resolver.getOrPut(self.gpa, @intCast(u8, file_index));
+    if (!result.found_existing) {
+        result.value_ptr.* = .{};
+    }
+    try result.value_ptr.append(.{
+        .section_type = section_type,
+        .old_index = @intCast(u32, old_index),
+        .new_index = @intCast(u32, new_index),
+    });
+}
+
+/// Based on the index of a object file, and a section-type, it will try to resolve
+/// the new index of the section.
+fn resolveNewSectionIndex(self: Wasm, file_index: usize, section_type: spec.Section, old_index: u32) ?u32 {
+    const reindexes = self.section_resolver.get(@intCast(u8, file_index)) orelse return null;
+    return for (reindexes) |reindex| {
+        if (reindex.section_type == section_type and reindex.old_index == old_index) {
+            break reindex.new_index;
+        }
+    } else null;
 }

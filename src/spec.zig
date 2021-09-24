@@ -179,12 +179,13 @@ pub const sections = struct {
     };
 
     pub const Code = struct {
-        pub const Local = struct {
-            valtype: ValueType,
-            count: u32,
-        };
-        locals: []const Local,
-        body: []const Instruction,
+        data: []u8,
+        // pub const Local = struct {
+        //     valtype: ValueType,
+        //     count: u32,
+        // };
+        // locals: []const Local,
+        // body: []const Instruction,
     };
 
     pub const Data = struct {
@@ -304,6 +305,17 @@ pub const Relocation = struct {
             };
         }
     };
+
+    /// Verifies the relocation type of a given `Relocation` and returns
+    /// true when the relocation references a function call or address to a function.
+    pub fn isFunction(self: Relocation) bool {
+        return switch (self.relocation_type) {
+            .R_WASM_FUNCTION_INDEX_LEB,
+            .R_WASM_TABLE_INDEX_SLEB,
+            => true,
+            else => false,
+        };
+    }
 
     pub fn format(self: Relocation, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
