@@ -76,10 +76,12 @@ pub fn addObjects(self: *Wasm, file_paths: []const []const u8) !void {
 /// Flushes the `Wasm` construct into a final wasm binary by linking
 /// the objects, ensuring the final binary file has no collisions.
 pub fn flush(self: *Wasm) !void {
+    try self.mergeGlobals();
     try self.mergeFunctions();
 }
 
-/// Merges all function sections into the final binary, and patches 
+/// Merges all function and code sections into the final binary.
+/// Does not perform any relocations for function references inside code sections.
 fn mergeFunctions(self: *Wasm) !void {
     for (self.objects.items) |object, file_index| {
         const func_sections: Object.SectionData(spec.sections.Func) = object.funcs;
@@ -109,13 +111,28 @@ fn mergeFunctions(self: *Wasm) !void {
     }
 }
 
+/// Merges the globals of all object files into the final binary
+/// This will not perform any relocations of references to globals.
+fn mergeGlobals(self: *Wasm) !void {
+    for (self.objects.items) |object, file_index| {
+        const global_section = object.globals;
+        if (global_section.isEmpty()) continue;
+
+        for (global_section.data) |global, global_index| {
+            const new_idx = @intCast(u32, self.globals.items.len);
+            try self.globals.append(self.gpa, global);
+            try self.appendReindex(file_index, .global, global_index, new_idx);
+        }
+    }
+}
+
 /// Appends a new reindex into `section_resolver`
 fn appendReindex(self: *Wasm, file_index: usize, section_type: spec.Section, old_index: usize, new_index: usize) !void {
     const result = try self.section_resolver.getOrPut(self.gpa, @intCast(u8, file_index));
     if (!result.found_existing) {
         result.value_ptr.* = .{};
     }
-    try result.value_ptr.append(.{
+    try result.value_ptr.append(self.gpa, .{
         .section_type = section_type,
         .old_index = @intCast(u32, old_index),
         .new_index = @intCast(u32, new_index),
