@@ -467,10 +467,11 @@ pub const SymInfo = struct {
         };
         const visible: []const u8 = if (self.isVisible()) "yes" else "no";
         const sym_binding: []const u8 = if (self.isLocal()) "local" else "global";
+        const name: []const u8 = if (self.name.len == 0) "<import>" else self.name;
 
         try writer.print(
             "{c} binding={s} visible={s} id={d} name={s}",
-            .{ kind_fmt, sym_binding, visible, self.index, self.name },
+            .{ kind_fmt, sym_binding, visible, self.index, name },
         );
     }
 };
