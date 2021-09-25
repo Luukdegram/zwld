@@ -3,11 +3,15 @@
 //! the data on correctness. The result can then be used by the linker.
 const Object = @This();
 
-const std = @import("std");
+const Atom = @import("Atom.zig");
 const spec = @import("spec.zig");
+const std = @import("std");
+const Wasm = @import("Wasm.zig");
+
 const Allocator = std.mem.Allocator;
 const leb = std.leb;
 const meta = std.meta;
+
 const log = std.log.scoped(.zwld);
 
 /// Wasm spec version used for this `Object`
@@ -18,32 +22,10 @@ version: u32 = 0,
 arena: std.heap.ArenaAllocator.State = .{},
 /// The file descriptor that represents the wasm object file.
 file: ?std.fs.File = null,
-/// Represents all custom sections
-custom: []const spec.sections.Custom = &.{},
-/// Contains all types (currently only function types)
-types: SectionData(spec.sections.Type) = .{},
-/// Contains all host environment imports for this object
-imports: SectionData(spec.sections.Import) = .{},
-/// A list of all functions (both used and unused)
-functions: SectionData(spec.sections.Func) = .{},
-/// A list of tables, mapping id's
-tables: SectionData(spec.sections.Table) = .{},
-/// All memories that wasm object contains.
-/// This is always at most 1 in the current spec.
-memories: SectionData(spec.sections.Memory) = .{},
-/// A list of globals
-globals: SectionData(spec.sections.Global) = .{},
-/// All functions, globals, etc that are to be exported to
-/// the host environment
-exports: SectionData(spec.sections.Export) = .{},
-/// A list of elements
-elements: SectionData(spec.sections.Element) = .{},
-/// A list of code spec.sections, where each code section
-/// belongs to a function definition.
-code: SectionData(spec.sections.Code) = .{},
-/// A list of data spec.sections, referenced by a memory section.
-/// In the current version of the wasm spec, this is at most 1.
-data: SectionData(spec.sections.Data) = .{},
+/// Name [read path] of the object file.
+name: []const u8,
+/// A list of all sections this module contains.
+sections: []const Section = &.{},
 /// Represents the function ID that must be called on startup.
 /// This is `null` by default as runtimes may determine the startup
 /// function themselves. This is essentially legacy.
@@ -52,17 +34,23 @@ start: ?spec.indexes.Func = null,
 /// used (or therefore missing) and must generate an error when another
 /// object uses features that are not supported by the other.
 features: []const spec.Feature = &.{},
-/// Contains meta data, required for the linker to ensure the correct symbols
-/// are exported. This should never be `null` after parsing.
-link_data: ?spec.LinkMetaData = null,
 /// A table that maps the relocations we must perform where the key represents
 /// the section that the list of relocations applies to.
 relocations: std.AutoArrayHashMapUnmanaged(u32, []const spec.Relocation) = .{},
+/// Table of symbols belonging to this Object file
+symtable: []const spec.SymInfo = &.{},
+/// Extra metadata about the linking section, such as alignment of segments and their name
+segment_info: []const spec.Segment = &.{},
+/// A sequence of function initializers that must be called on startup
+init_funcs: []const spec.InitFunc = &.{},
+/// Comdat information
+comdat_info: []const spec.Comdat = &.{},
 
 /// Initializes a new `Object` from a wasm object file.
-pub fn init(gpa: *Allocator, file: std.fs.File) !Object {
+pub fn init(gpa: *Allocator, file: std.fs.File, path: []const u8) !Object {
     var object: Object = .{
         .file = file,
+        .name = path,
     };
 
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -81,56 +69,31 @@ pub fn deinit(self: *Object, gpa: *Allocator) void {
     self.* = undefined;
 }
 
-/// Generic over type `T` that represents a section.
-/// While a section contains its own data structure, each section
-/// is essentially a sequence of that section in a wasm binary, meaning
-/// they all contain a slice of `T`, and a start -and end position within the binary.
-pub fn SectionData(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        data: []const T = &.{},
-        start: usize = 0,
-        end: usize = 0,
-        id: usize = 0,
-
-        /// Formats the `SectionData` for debug purposes
-        pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            _ = options;
-            _ = fmt;
-            const type_name = comptime blk: {
-                var name: [@typeName(T).len]u8 = undefined;
-                std.mem.copy(u8, &name, @typeName(T));
-                name[0] = std.ascii.toUpper(name[0]);
-                break :blk name;
-            };
-            try writer.print("{s: >8} start=0x{x:0>8} end=0x{x:0>8} (size=0x{x:0>8}) count: {d}", .{
-                type_name,
-                self.start,
-                self.end,
-                self.end - self.start,
-                self.data.len,
-            });
+/// Returns a section from a given section type. Will return `null` if the section
+/// does not exist within the wasm module.
+/// Asserts given `section_type` is not `.custom` as custom sections are not unique by type (id)
+/// but by name.
+pub fn sectionByType(self: *Object, section_type: spec.Section) ?Section {
+    std.debug.assert(section_type != .custom);
+    return for (self.sections) |section| {
+        if (section.section_kind == section_type) {
+            break section;
         }
-
-        /// Returns true when the section is empty (read: non-existant)
-        pub fn isEmpty(self: Self) bool {
-            return self.data.len == 0;
-        }
-
-        /// From a given index, attempts to retrieve the value within the `data` slice
-        /// at that index. When `data` is empty, or the given index exceeds its bounds,
-        /// returns `null`.
-        pub fn atIndex(self: Self, idx: usize) ?T {
-            if (idx >= self.data.len - 1) return null;
-            return self.data[idx];
-        }
-
-        /// Returns the amount of segments in a given section
-        pub fn count(self: Self) usize {
-            return self.data.len;
-        }
-    };
+    } else null;
 }
+
+/// Represents a wasm section entry within a wasm module
+/// A section contains meta data that can be used to parse its contents from within a file.
+pub const Section = struct {
+    /// The type of a section
+    section_kind: spec.Section,
+    /// Offset into the object file where the section starts
+    offset: usize,
+    /// Size in bytes of the section
+    size: usize,
+    /// The count of entries within a section
+    count: usize,
+};
 
 /// Error set containing parsing errors.
 /// Merged with reader's errorset by `Parser`
@@ -186,7 +149,10 @@ fn Parser(comptime ReaderType: type) type {
             var magic_bytes: [4]u8 = undefined;
 
             try self.reader.reader().readNoEof(&magic_bytes);
-            if (!std.mem.eql(u8, &magic_bytes, &std.wasm.magic)) return error.InvalidMagicByte;
+            if (!std.mem.eql(u8, &magic_bytes, &std.wasm.magic)) {
+                log.info("Invalid magic bytes '{s}'", .{&magic_bytes});
+                return error.InvalidMagicByte;
+            }
         }
 
         fn parseObject(self: *Self, gpa: *Allocator) Error!void {
@@ -195,247 +161,43 @@ fn Parser(comptime ReaderType: type) type {
 
             self.object.version = version;
 
-            // represents the index of a section.
-            // Whenever we find a section we increase this by 1.
-            var index: u32 = 0;
-
-            // custom sections do not provide a count, as they are each their very own
-            // section that simply share the same section ID. For this reason we use
-            // an arraylist so we can append them individually.
-            var custom_sections = std.ArrayList(spec.sections.Custom).init(gpa);
+            var sections = std.ArrayList(Section).init(gpa);
+            defer sections.deinit();
 
             while (self.reader.reader().readByte()) |byte| {
-                defer index += 1;
                 const len = try readLeb(u32, self.reader.reader());
-                const reader = std.io.limitedReader(self.reader.reader(), len).reader();
+                try sections.append(.{
+                    .offset = self.reader.bytes_read,
+                    .size = len,
+                    .section_kind = @intToEnum(spec.Section, byte),
+                });
 
-                switch (@intToEnum(spec.Section, byte)) {
-                    .custom => {
-                        const start = self.reader.bytes_read;
-                        const custom = try custom_sections.addOne();
-                        const name_len = try readLeb(u32, reader);
-                        const name = try gpa.alloc(u8, name_len);
-                        try reader.readNoEof(name);
+                // We only parse extra information when it's a custom section
+                // all other sections we simply skip
+                if (byte != 0x00) {
+                    try self.reader.reader().skipBytes(len, .{});
+                } else {
+                    const reader = std.io.limitedReader(self.reader.reader(), len).reader();
+                    const name_len = try readLeb(u32, reader);
+                    const name = try gpa.alloc(u8, name_len);
+                    defer gpa.free(name);
+                    try reader.readNoEof(name);
 
-                        const data: ?[]const u8 = blk: {
-                            if (std.mem.eql(u8, name, "linking")) {
-                                try self.parseMetadata(gpa, reader.context.bytes_left);
-                                break :blk null;
-                            } else if (std.mem.startsWith(u8, name, "reloc")) {
-                                try self.parseRelocations(gpa);
-                                break :blk null;
-                            } else if (std.mem.eql(u8, name, "target_features")) {
-                                try self.parseFeatures(gpa);
-                                break :blk null;
-                            }
-
-                            const data = try gpa.alloc(u8, reader.context.bytes_left);
-                            try reader.readNoEof(data);
-                            break :blk data;
-                        };
-
-                        custom.* = .{ .name = name, .data = data, .start = start, .end = self.reader.bytes_read };
-                    },
-                    .type => {
-                        self.object.types.id = index;
-                        self.object.types.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.types.data, reader, gpa)) |*type_val| {
-                            if ((try reader.readByte()) != std.wasm.function_type) return error.ExpectedFuncType;
-
-                            for (try readVec(&type_val.params, reader, gpa)) |*param| {
-                                param.* = try readEnum(spec.ValueType, reader);
-                            }
-
-                            for (try readVec(&type_val.returns, reader, gpa)) |*result| {
-                                result.* = try readEnum(spec.ValueType, reader);
-                            }
-                        }
-                        self.object.types.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .import => {
-                        self.object.imports.id = index;
-                        self.object.imports.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.imports.data, reader, gpa)) |*import| {
-                            const module_len = try readLeb(u32, reader);
-                            const module_name = try gpa.alloc(u8, module_len);
-                            import.module = module_name;
-                            try reader.readNoEof(module_name);
-
-                            const name_len = try readLeb(u32, reader);
-                            const name = try gpa.alloc(u8, name_len);
-                            import.name = name;
-                            try reader.readNoEof(name);
-
-                            const kind = try readEnum(spec.ExternalType, reader);
-                            import.kind = switch (kind) {
-                                .function => .{ .function = try readEnum(spec.indexes.Type, reader) },
-                                .memory => .{ .memory = try readLimits(reader) },
-                                .global => .{ .global = .{
-                                    .valtype = try readEnum(spec.ValueType, reader),
-                                    .mutable = (try reader.readByte()) == 0x01,
-                                } },
-                                .table => .{ .table = .{
-                                    .reftype = try readEnum(spec.RefType, reader),
-                                    .limits = try readLimits(reader),
-                                } },
-                            };
-                        }
-                        self.object.imports.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .function => {
-                        self.object.functions.id = index;
-                        self.object.functions.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.functions.data, reader, gpa)) |*func| {
-                            func.type_idx = try readEnum(spec.indexes.Type, reader);
-                        }
-                        self.object.functions.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .table => {
-                        self.object.tables.id = index;
-                        self.object.tables.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.tables.data, reader, gpa)) |*table| {
-                            table.* = .{
-                                .reftype = try readEnum(spec.RefType, reader),
-                                .limits = try readLimits(reader),
-                            };
-                        }
-                        self.object.tables.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .memory => {
-                        self.object.memories.id = index;
-                        self.object.memories.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.memories.data, reader, gpa)) |*memory| {
-                            memory.* = .{ .limits = try readLimits(reader) };
-                        }
-                        self.object.memories.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .global => {
-                        self.object.globals.id = index;
-                        self.object.globals.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.globals.data, reader, gpa)) |*global| {
-                            global.* = .{
-                                .valtype = try readEnum(spec.ValueType, reader),
-                                .mutable = (try reader.readByte()) == 0x01,
-                                .init = try readInit(reader),
-                            };
-                        }
-                        self.object.globals.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .@"export" => {
-                        self.object.exports.id = index;
-                        self.object.exports.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.exports.data, reader, gpa)) |*exp| {
-                            const name_len = try readLeb(u32, reader);
-                            const name = try gpa.alloc(u8, name_len);
-                            try reader.readNoEof(name);
-                            exp.* = .{
-                                .name = name,
-                                .kind = try readEnum(spec.ExternalType, reader),
-                                .index = try readLeb(u32, reader),
-                            };
-                        }
-                        self.object.exports.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .start => {
-                        self.object.start = try readEnum(spec.indexes.Func, reader);
-                        try assertEnd(reader);
-                    },
-                    .element => {
-                        self.object.elements.id = index;
-                        self.object.elements.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.elements.data, reader, gpa)) |*elem| {
-                            elem.table_idx = try readEnum(spec.indexes.Table, reader);
-                            elem.offset = try readInit(reader);
-
-                            for (try readVec(&elem.func_idxs, reader, gpa)) |*idx| {
-                                idx.* = try readEnum(spec.indexes.Func, reader);
-                            }
-                        }
-                        self.object.elements.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .code => {
-                        self.object.code.id = index;
-                        self.object.code.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.code.data, reader, gpa)) |*code| {
-                            const body_len = try readLeb(u32, reader);
-                            const data = try gpa.alloc(u8, body_len);
-                            try reader.readNoEof(data);
-                            code.* = .{ .data = data };
-
-                            // var code_reader = std.io.limitedReader(reader, body_len).reader();
-
-                            // // first parse the local declarations
-                            // {
-                            //     const locals_len = try readLeb(u32, code_reader);
-                            //     const locals = try gpa.alloc(spec.sections.Code.Local, locals_len);
-                            //     for (locals) |*local| {
-                            //         local.* = .{
-                            //             .count = try readLeb(u32, code_reader),
-                            //             .valtype = try readEnum(spec.ValueType, code_reader),
-                            //         };
-                            //     }
-
-                            //     code.locals = locals;
-                            // }
-
-                            // {
-                            //     var instructions = std.ArrayList(spec.Instruction).init(gpa);
-                            //     defer instructions.deinit();
-
-                            //     while (readEnum(std.wasm.Opcode, code_reader)) |opcode| {
-                            //         const instr = try buildInstruction(opcode, gpa, code_reader);
-                            //         try instructions.append(instr);
-                            //     } else |err| switch (err) {
-                            //         error.EndOfStream => {
-                            //             const maybe_end = instructions.popOrNull() orelse return error.MissingEndForBody;
-                            //             if (maybe_end.opcode != .end) return error.MissingEndForBody;
-                            //         },
-                            //         else => |e| return e,
-                            //     }
-
-                            //     code.body = instructions.toOwnedSlice();
-                            // }
-                            // try assertEnd(code_reader);
-                        }
-                        self.object.code.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    .data => {
-                        self.object.data.id = index;
-                        self.object.data.start = self.reader.bytes_read;
-                        for (try readVec(&self.object.data.data, reader, gpa)) |*data| {
-                            data.index = try readEnum(spec.indexes.Mem, reader);
-                            data.offset = try readInit(reader);
-
-                            const init_len = try readLeb(u32, reader);
-                            const init_data = try gpa.alloc(u8, init_len);
-                            try reader.readNoEof(init_data);
-                            data.data = init_data;
-                        }
-                        self.object.data.end = self.reader.bytes_read;
-                        try assertEnd(reader);
-                    },
-                    else => |id| {
-                        log.info("Found unimplemented section with id '{d}' at index {d}, skipping bytes", .{
-                            @enumToInt(id),
-                            index,
-                        });
+                    if (std.mem.eql(u8, name, "linking")) {
+                        try self.parseMetadata(gpa, reader.context.bytes_left);
+                    } else if (std.mem.startsWith(u8, name, "reloc")) {
+                        try self.parseRelocations(gpa);
+                    } else if (std.mem.eql(u8, name, "target_features")) {
+                        try self.parseFeatures(gpa);
+                    } else {
                         try reader.skipBytes(reader.context.bytes_left, .{});
-                    },
+                    }
                 }
             } else |err| switch (err) {
-                error.EndOfStream => {},
+                error.EndOfStream => {}, // finished parsing the file
                 else => |e| return e,
             }
-            self.object.custom = custom_sections.toOwnedSlice();
+            self.object.sections = sections.toOwnedSlice();
         }
 
         /// Based on the "features" custom section, parses it into a list of
@@ -504,16 +266,9 @@ fn Parser(comptime ReaderType: type) type {
             log.info("Link meta data version: {d}", .{version});
             if (version != 2) return error.UnsupportedVersion;
 
-            var subsections = std.ArrayList(spec.Subsection).init(gpa);
-
             while (limited.bytes_left > 0) {
-                const subsection = try subsections.addOne();
-                subsection.* = try self.parseSubsection(gpa, limited_reader);
+                try self.parseSubsection(gpa, limited_reader);
             }
-            self.object.link_data = .{
-                .version = version,
-                .subsections = subsections.toOwnedSlice(),
-            };
         }
 
         /// Parses a `spec.Subsection`.
@@ -522,18 +277,19 @@ fn Parser(comptime ReaderType: type) type {
         ///
         /// `self` is used to provide access to other sections that may be needed,
         /// such as access to the `import` section to find the name of a symbol.
-        fn parseSubsection(self: *Self, gpa: *Allocator, reader: anytype) !spec.Subsection {
+        fn parseSubsection(self: *Self, gpa: *Allocator, reader: anytype) !void {
             const sub_type = try leb.readULEB128(u8, reader);
-            log.info("Found subsection: {s}", .{@tagName(@intToEnum(spec.Subsection.Type, sub_type))});
+            log.info("Found subsection: {s}", .{@tagName(@intToEnum(spec.SubsectionType, sub_type))});
             const payload_len = try leb.readULEB128(u32, reader);
-            if (payload_len == 0) return spec.Subsection{ .empty = {} };
+            if (payload_len == 0) return;
+
             var limited = std.io.limitedReader(reader, payload_len);
             const limited_reader = limited.reader();
 
             // every subsection contains a 'count' field
             const count = try leb.readULEB128(u32, limited_reader);
 
-            switch (@intToEnum(spec.Subsection.Type, sub_type)) {
+            switch (@intToEnum(spec.SubsectionType, sub_type)) {
                 .WASM_SEGMENT_INFO => {
                     const segments = try gpa.alloc(spec.Segment, count);
                     for (segments) |*segment| {
@@ -551,7 +307,7 @@ fn Parser(comptime ReaderType: type) type {
                             segment.flags,
                         });
                     }
-                    return spec.Subsection{ .segment_info = segments };
+                    self.object.segment_info = segments;
                 },
                 .WASM_INIT_FUNCS => {
                     const funcs = try gpa.alloc(spec.InitFunc, count);
@@ -562,8 +318,7 @@ fn Parser(comptime ReaderType: type) type {
                         };
                         log.info("Found function - prio: {d}, index: {d}", .{ func.priority, func.symbol_index });
                     }
-
-                    return spec.Subsection{ .init_funcs = funcs };
+                    self.object.init_funcs = funcs;
                 },
                 .WASM_COMDAT_INFO => {
                     const comdats = try gpa.alloc(spec.Comdat, count);
@@ -593,7 +348,7 @@ fn Parser(comptime ReaderType: type) type {
                         };
                     }
 
-                    return spec.Subsection{ .comdat_info = comdats };
+                    self.object.comdat_info = comdats;
                 },
                 .WASM_SYMBOL_TABLE => {
                     const symbols = try gpa.alloc(spec.SymInfo, count);
@@ -607,7 +362,7 @@ fn Parser(comptime ReaderType: type) type {
                         });
                     }
 
-                    return spec.Subsection{ .symbol_table = symbols };
+                    self.object.symtable = symbols;
                 },
             }
         }
@@ -615,7 +370,7 @@ fn Parser(comptime ReaderType: type) type {
         /// Parses the symbol information based on its kind,
         /// requires access to `Object` to find the name of a symbol when it's
         /// an import and flag `WASM_SYM_EXPLICIT_NAME` is not set.
-        fn parseSymbol(self: *Self, gpa: *Allocator, reader: anytype) !spec.SymInfo {
+        fn parseSymbol(gpa: *Allocator, reader: anytype) !spec.SymInfo {
             var symbol: spec.SymInfo = undefined;
 
             symbol.kind = @intToEnum(spec.SymInfo.Type, try leb.readULEB128(u8, reader));
@@ -633,7 +388,6 @@ fn Parser(comptime ReaderType: type) type {
                         symbol.index = try leb.readULEB128(u32, reader);
                         symbol.offset = try leb.readULEB128(u32, reader);
                         symbol.size = try leb.readULEB128(u32, reader);
-                        // TODO: Verify offset and size
                     }
                 },
                 .SYMTAB_SECTION => {
@@ -649,13 +403,6 @@ fn Parser(comptime ReaderType: type) type {
                         const name = try gpa.alloc(u8, name_len);
                         try reader.readNoEof(name);
                         symbol.name = name;
-                    } else if (is_import) {
-                        // symbol is an import and flag for explicit name is not set
-                        const import = self.object.imports.atIndex(symbol.index.?) orelse {
-                            log.info("Import at index {d} does not exist for symbol", .{symbol.index});
-                            return error.InvalidIndex;
-                        };
-                        symbol.name = try gpa.dupe(u8, import.name);
                     }
                 },
             }
@@ -725,113 +472,41 @@ fn assertEnd(reader: anytype) !void {
     if (reader.context.bytes_left != 0) return error.MalformedSection;
 }
 
-fn buildInstruction(opcode: std.wasm.Opcode, gpa: *Allocator, reader: anytype) !spec.Instruction {
-    var instr: spec.Instruction = .{
-        .opcode = opcode,
-        .value = undefined,
-    };
+/// Parses a single object file into a linked list of atoms
+pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm: *Wasm) !void {
+    // self.symtable[0].kind
+    _ = self;
+    _ = gpa;
+    _ = object_index;
+    _ = wasm;
+    var symbols_by_section = std.AutoHashMap(spec.Section, std.ArrayList(u32)).init(gpa);
+    defer symbols_by_section.deinit();
 
-    instr.value = switch (opcode) {
-        .block,
-        .loop,
-        .@"if",
-        => .{ .blocktype = try readEnum(spec.BlockType, reader) },
-        .br,
-        .br_if,
-        .call,
-        // ref.func 'x'
-        @intToEnum(std.wasm.Opcode, 0xD2),
-        .local_get,
-        .local_set,
-        .local_tee,
-        .global_get,
-        .global_set,
-        spec.table_get,
-        spec.table_set,
-        .memory_size,
-        .memory_grow,
-        => .{ .u32 = try readLeb(u32, reader) },
-        .call_indirect,
-        .i32_load,
-        .i64_load,
-        .f32_load,
-        .f64_load,
-        .i32_load8_s,
-        .i32_load8_u,
-        .i32_load16_s,
-        .i32_load16_u,
-        .i64_load8_s,
-        .i64_load8_u,
-        .i64_load16_s,
-        .i64_load16_u,
-        .i64_load32_s,
-        .i64_load32_u,
-        .i32_store,
-        .i64_store,
-        .f32_store,
-        .f64_store,
-        .i32_store8,
-        .i32_store16,
-        .i64_store8,
-        .i64_store16,
-        .i64_store32,
-        => .{ .multi = .{
-            .x = try readLeb(u32, reader),
-            .y = try readLeb(u32, reader),
-        } },
-        .br_table => blk: {
-            const len = try readLeb(u32, reader);
-            const list = try gpa.alloc(u32, len);
+    for (self.sections) |section| {
+        try symbols_by_section.putNoClobber(section.section_kind, std.ArrayList(u32).init(gpa));
+    }
 
-            for (list) |*item| {
-                item.* = try readLeb(u32, reader);
-            }
-            break :blk .{ .list = .{ .data = list.ptr, .len = len } };
-        },
-        // ref.null 't'
-        @intToEnum(std.wasm.Opcode, 0xD0) => .{ .reftype = try readEnum(spec.RefType, reader) },
-        // select 'vec(t)'
-        @intToEnum(std.wasm.Opcode, 0x1C) => blk: {
-            const len = try readLeb(u32, reader);
-            const list = try gpa.alloc(spec.ValueType, len);
-            errdefer gpa.free(list);
+    for (self.symtable) |sym, sym_index| {
+        const sect_ty: spec.Section = switch (sym.kind) {
+            .SYMTAB_FUNCTION => .func,
+            .SYMTAB_DATA => .data,
+            .SYMTAB_GLOBAL => .global,
+            .SYMTAB_SECTION => continue,
+            .SYMTAB_EVENT => continue,
+            .SYMTAB_TABLE => .table,
+        };
+        const map = symbols_by_section.getPtr(sect_ty) orelse continue;
+        try map.append(@intCast(u32, sym_index));
+    }
 
-            for (list) |*item| {
-                item.* = try readEnum(spec.ValueType, reader);
-            }
-            break :blk .{ .multi_valtype = .{ .data = list.ptr, .len = len } };
-        },
-        spec.need_secondary => @as(spec.Instruction.InstrValue, blk: {
-            const secondary = try readEnum(spec.SecondaryOpcode, reader);
-            instr.secondary = secondary;
-            switch (secondary) {
-                .i32_trunc_sat_f32_s,
-                .i32_trunc_sat_f32_u,
-                .i32_trunc_sat_f64_s,
-                .i32_trunc_sat_f64_u,
-                .i64_trunc_sat_f32_s,
-                .i64_trunc_sat_f32_u,
-                .i64_trunc_sat_f64_s,
-                .i64_trunc_sat_f64_u,
-                => break :blk .{ .none = {} },
-                .table_init,
-                .table_copy,
-                .memory_init,
-                .data_drop,
-                .memory_copy,
-                => break :blk .{ .multi = .{
-                    .x = try readLeb(u32, reader),
-                    .y = try readLeb(u32, reader),
-                } },
-                else => break :blk .{ .u32 = try readLeb(u32, reader) },
-            }
-        }),
-        .i32_const => .{ .i32 = try readLeb(i32, reader) },
-        .i64_const => .{ .i64 = try readLeb(i64, reader) },
-        .f32_const => .{ .f32 = @bitCast(f32, try readLeb(u32, reader)) },
-        .f64_const => .{ .f64 = @bitCast(f64, try readLeb(u64, reader)) },
-        else => .{ .none = {} },
-    };
+    for (self.sections) |section, idx| {
+        log.info("Parsing section '{s}'", .{@tagName(section.section_kind)});
 
-    return instr;
+        const match_index = (try wasm.getMatchingSection(object_index, idx)) orelse {
+            log.info("unhandled section", .{});
+            continue;
+        };
+
+        const atom = try Atom.
+    }
 }
