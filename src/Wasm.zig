@@ -44,6 +44,7 @@ pub fn openPath(path: []const u8) !Wasm {
 /// Releases any resources that is owned by `Wasm`,
 /// usage after calling deinit is illegal behaviour.
 pub fn deinit(self: *Wasm, gpa: *Allocator) void {
+    self.atoms.deinit(gpa);
     for (self.managed_atoms.items) |atom| {
         atom.deinit(gpa);
     }
@@ -57,6 +58,7 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     }
     self.globals.deinit(gpa);
     self.objects.deinit(gpa);
+    self.sections.deinit(gpa);
     self.file.close();
     self.* = undefined;
 }

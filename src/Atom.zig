@@ -52,6 +52,8 @@ pub fn createEmpty(gpa: *Allocator) !*Atom {
 pub fn deinit(self: *Atom, gpa: *Allocator) void {
     self.relocs.deinit(gpa);
     self.aliases.deinit(gpa);
+    self.contained.deinit(gpa);
+    self.code.deinit(gpa);
     gpa.destroy(self);
 }
 

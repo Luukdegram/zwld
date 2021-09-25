@@ -408,12 +408,14 @@ fn Parser(comptime ReaderType: type) type {
         /// requires access to `Object` to find the name of a symbol when it's
         /// an import and flag `WASM_SYM_EXPLICIT_NAME` is not set.
         fn parseSymbol(gpa: *Allocator, reader: anytype) !spec.SymInfo {
-            var symbol: spec.SymInfo = undefined;
+            const kind = @intToEnum(spec.SymInfo.Type, try leb.readULEB128(u8, reader));
+            const flags = try leb.readULEB128(u32, reader);
+            var symbol: spec.SymInfo = .{
+                .kind = kind,
+                .flags = flags,
+            };
 
-            symbol.kind = @intToEnum(spec.SymInfo.Type, try leb.readULEB128(u8, reader));
-            symbol.flags = try leb.readULEB128(u32, reader);
-
-            switch (symbol.kind) {
+            switch (kind) {
                 .SYMTAB_DATA => {
                     const name_len = try leb.readULEB128(u32, reader);
                     const name = try gpa.alloc(u8, name_len);
@@ -511,10 +513,13 @@ fn assertEnd(reader: anytype) !void {
 
 /// Parses a single object file into a linked list of atoms
 pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm: *Wasm) !void {
-    var symbols_by_section = std.AutoHashMap(spec.SectionType, std.ArrayList(u32)).init(gpa);
-    defer symbols_by_section.deinit();
+    var symbols_by_section = std.AutoArrayHashMap(spec.SectionType, std.ArrayList(u32)).init(gpa);
+    defer for (symbols_by_section.values()) |syms| {
+        syms.deinit();
+    } else symbols_by_section.deinit();
 
     for (self.sections) |section| {
+        if (section.section_kind == .custom) continue;
         try symbols_by_section.putNoClobber(section.section_kind, std.ArrayList(u32).init(gpa));
     }
 
@@ -562,7 +567,9 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm: *
             }
         }
         sortBySeniority(atom.aliases.items, self);
-        atom.sym_index = atom.aliases.swapRemove(0); // take index of highest seniority
+        if (atom.aliases.items.len > 0) {
+            atom.sym_index = atom.aliases.swapRemove(0); // take index of highest seniority
+        }
 
         const code = try self.loadSectionData(gpa, section);
         defer gpa.free(code);
