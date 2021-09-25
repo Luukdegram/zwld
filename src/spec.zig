@@ -38,11 +38,35 @@ pub const ValueType = MergedEnums(NumType, RefType);
 ///
 /// Note: This version is non-exhaustive to continue parsing
 /// when a new section is proposed but not yet implemented.
-pub const Section = MergedEnum(wasm.Section, &.{
+pub const SectionType = MergedEnum(wasm.Section, &.{
     .{ .name = "module", .value = 14 },
     .{ .name = "instance", .value = 15 },
     .{ .name = "alias", .value = 16 },
 });
+
+/// Represents a wasm section entry within a wasm module
+/// A section contains meta data that can be used to parse its contents from within a file.
+pub const Section = struct {
+    /// The type of a section
+    section_kind: SectionType,
+    /// Offset into the object file where the section starts
+    offset: usize,
+    /// Size in bytes of the section
+    size: usize,
+
+    /// Returns the index of a given section type within a given slice of sections.
+    /// When the section type is not found, `null` will be returned.
+    ///
+    /// Asserts `sec_type` is not a custom section
+    pub fn getIndex(section_slice: []const Section, sec_type: SectionType) ?u16 {
+        std.debug.assert(sec_type != .custom);
+        return for (section_slice) |section, idx| {
+            if (section.section_kind == sec_type) {
+                break @intCast(u16, idx);
+            }
+        } else null;
+    }
+};
 
 /// Merges a given enum type and a slice of `EnumField` into a new enum type
 fn MergedEnum(comptime T: type, comptime fields: []const TypeInfo.EnumField) type {
@@ -129,7 +153,7 @@ pub const sections = struct {
     };
 
     pub const Import = struct {
-        module: []const u8,
+        module_name: []const u8,
         name: []const u8,
         kind: Kind,
 
@@ -397,8 +421,26 @@ pub const SymInfo = struct {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_BINDING_LOCAL) != 0;
     }
 
+    pub fn isGlobal(self: SymInfo) bool {
+        return self.flags & @enumToInt(SymbolFlag.WASM_SYM_BINDING_LOCAL) == 0;
+    }
+
     pub fn isExported(self: SymInfo) bool {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_EXPORTED) != 0;
+    }
+
+    pub fn isWeak(self: SymInfo) bool {
+        return self.flags & @enumToInt(SymbolFlag.WASM_SYM_BINDING_WEAK) != 0;
+    }
+
+    pub fn eqlBinding(self: SymInfo, other: SymInfo) bool {
+        if (self.isLocal() != other.isLocal()) {
+            return false;
+        }
+        if (self.isWeak() != other.isWeak()) {
+            return false;
+        }
+        return true;
     }
 
     pub const Type = enum(u8) {
@@ -424,11 +466,11 @@ pub const SymInfo = struct {
             .SYMTAB_TABLE => 'T',
         };
         const visible: []const u8 = if (self.isVisible()) "yes" else "no";
-        const binding: []const u8 = if (self.isLocal()) "local" else "global";
+        const sym_binding: []const u8 = if (self.isLocal()) "local" else "global";
 
         try writer.print(
             "{c} binding={s} visible={s} id={d} name={s}",
-            .{ kind_fmt, binding, visible, self.index, self.name },
+            .{ kind_fmt, sym_binding, visible, self.index, self.name },
         );
     }
 };

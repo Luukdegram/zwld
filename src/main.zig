@@ -1,9 +1,11 @@
-const std = @import("std");
-const io = std.io;
 const clap = @import("clap");
-const Object = @import("Object.zig");
 const Linker = @import("Linker.zig");
+const Object = @import("Object.zig");
 const spec = @import("spec.zig");
+const std = @import("std");
+const Wasm = @import("Wasm.zig");
+
+const io = std.io;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const ally = &gpa.allocator;
@@ -62,7 +64,7 @@ pub fn main() !void {
 
     if (args.option("-o") != null) {
         const output_path = args.option("-o").?;
-        try linkFileAndWriteToPath(positionals[0], output_path);
+        try linkFileAndWriteToPath(output_path, positionals);
         return;
     }
 
@@ -80,21 +82,22 @@ pub fn main() !void {
 }
 
 fn summarizeHeaders(object: Object) !void {
-    print("Sections:\n\n", .{});
-    if (!object.types.isEmpty()) print("{}\n", .{object.types});
-    if (!object.imports.isEmpty()) print("{}\n", .{object.imports});
-    if (!object.functions.isEmpty()) print("{}\n", .{object.functions});
-    if (!object.tables.isEmpty()) print("{}\n", .{object.tables});
-    if (!object.memories.isEmpty()) print("{}\n", .{object.memories});
-    if (!object.globals.isEmpty()) print("{}\n", .{object.globals});
-    if (!object.exports.isEmpty()) print("{}\n", .{object.exports});
-    if (!object.elements.isEmpty()) print("{}\n", .{object.elements});
-    if (!object.code.isEmpty()) print("{}\n", .{object.code});
-    if (!object.data.isEmpty()) print("{}\n", .{object.data});
-    for (object.custom) |custom| {
-        print("{}\n", .{custom});
-    }
-    print("\n", .{});
+    // print("Sections:\n\n", .{});
+    // if (!object.types.isEmpty()) print("{}\n", .{object.types});
+    // if (!object.imports.isEmpty()) print("{}\n", .{object.imports});
+    // if (!object.functions.isEmpty()) print("{}\n", .{object.functions});
+    // if (!object.tables.isEmpty()) print("{}\n", .{object.tables});
+    // if (!object.memories.isEmpty()) print("{}\n", .{object.memories});
+    // if (!object.globals.isEmpty()) print("{}\n", .{object.globals});
+    // if (!object.exports.isEmpty()) print("{}\n", .{object.exports});
+    // if (!object.elements.isEmpty()) print("{}\n", .{object.elements});
+    // if (!object.code.isEmpty()) print("{}\n", .{object.code});
+    // if (!object.data.isEmpty()) print("{}\n", .{object.data});
+    // for (object.custom) |custom| {
+    //     print("{}\n", .{custom});
+    // }
+    // print("\n", .{});
+    _ = object;
 }
 
 fn summarizeSymbols(object: Object) !void {
@@ -117,16 +120,12 @@ fn summarizeRelocs(object: Object) !void {
     }
 }
 
-fn linkFileAndWriteToPath(in_path: []const u8, out_path: []const u8) !void {
-    const file_in = std.fs.cwd().openFile(in_path, .{}) catch |err| {
-        return print("Could not open file {s} due to error: {s}\n", .{ in_path, @errorName(err) });
-    };
-    defer file_in.close();
-    const file_out = std.fs.cwd().createFile(out_path, .{}) catch |err| {
-        return print("Could not create file {s} due to error: {s}\n", .{ out_path, @errorName(err) });
-    };
-    defer file_out.close();
-    print("TODO!", .{});
+fn linkFileAndWriteToPath(out_path: []const u8, file_paths: []const []const u8) !void {
+    var bin = try Wasm.openPath(out_path);
+    defer bin.deinit(ally);
+
+    try bin.addObjects(ally, file_paths);
+    try bin.flush(ally);
 }
 
 fn print(comptime fmt: []const u8, args: anytype) void {
