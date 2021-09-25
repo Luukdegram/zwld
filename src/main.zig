@@ -57,7 +57,7 @@ pub fn main() !void {
     };
     defer file.close();
 
-    var object = try Object.init(ally, file);
+    var object = try Object.init(ally, file, path);
     defer object.deinit(ally);
 
     if (args.option("-o") != null) {
@@ -98,19 +98,8 @@ fn summarizeHeaders(object: Object) !void {
 }
 
 fn summarizeSymbols(object: Object) !void {
-    const link_data = object.link_data orelse return;
-
-    var symbols = std.ArrayList(spec.SymInfo).init(ally);
-    defer symbols.deinit();
-
-    for (link_data.subsections) |subsection| {
-        if (subsection == .symbol_table) {
-            try symbols.appendSlice(subsection.symbol_table);
-        }
-    }
-
     print("Symbol table:\n\n", .{});
-    for (symbols.items) |symbol, i| {
+    for (object.symtable) |symbol, i| {
         print(" {d}: {}\n", .{ i, symbol });
     }
     print("\n", .{});
@@ -126,7 +115,6 @@ fn summarizeRelocs(object: Object) !void {
             print(" {}\n", .{relocation});
         }
     }
-    // @panic("TODO");
 }
 
 fn linkFileAndWriteToPath(in_path: []const u8, out_path: []const u8) !void {

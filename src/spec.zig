@@ -328,27 +328,11 @@ pub const Relocation = struct {
     }
 };
 
-pub const LinkMetaData = struct {
-    /// The version of linking metadata contained in a section.
-    /// The current version is 2. This means we can reject unexpected/unsupported versions.
-    version: u32,
-    /// A sequence of subsections
-    subsections: []const Subsection,
-};
-
-pub const Subsection = union(enum) {
-    segment_info: []const Segment,
-    init_funcs: []const InitFunc,
-    comdat_info: []const Comdat,
-    symbol_table: []const SymInfo,
-    empty: void,
-
-    pub const Type = enum(u8) {
-        WASM_SEGMENT_INFO = 5,
-        WASM_INIT_FUNCS = 6,
-        WASM_COMDAT_INFO = 7,
-        WASM_SYMBOL_TABLE = 8,
-    };
+pub const SubsectionType = enum(u8) {
+    WASM_SEGMENT_INFO = 5,
+    WASM_INIT_FUNCS = 6,
+    WASM_COMDAT_INFO = 7,
+    WASM_SYMBOL_TABLE = 8,
 };
 
 pub const Segment = struct {
@@ -401,6 +385,22 @@ pub const SymInfo = struct {
         self.flags |= @enumToInt(flag);
     }
 
+    pub fn isUndefined(self: SymInfo) bool {
+        return self.flags & @enumToInt(SymbolFlag.WASM_SYM_UNDEFINED) != 0;
+    }
+
+    pub fn isVisible(self: SymInfo) bool {
+        return self.flags & @enumToInt(SymbolFlag.WASM_SYM_VISIBILITY_HIDDEN) == 0;
+    }
+
+    pub fn isLocal(self: SymInfo) bool {
+        return self.flags & @enumToInt(SymbolFlag.WASM_SYM_BINDING_LOCAL) != 0;
+    }
+
+    pub fn isExported(self: SymInfo) bool {
+        return self.flags & @enumToInt(SymbolFlag.WASM_SYM_EXPORTED) != 0;
+    }
+
     pub const Type = enum(u8) {
         SYMTAB_FUNCTION = 0,
         SYMTAB_DATA = 1,
@@ -423,8 +423,8 @@ pub const SymInfo = struct {
             .SYMTAB_EVENT => 'E',
             .SYMTAB_TABLE => 'T',
         };
-        const visible: []const u8 = if (self.hasFlag(.WASM_SYM_VISIBILITY_HIDDEN)) "no" else "yes";
-        const binding: []const u8 = if (self.hasFlag(.WASM_SYM_BINDING_LOCAL)) "local" else "global";
+        const visible: []const u8 = if (self.isVisible()) "yes" else "no";
+        const binding: []const u8 = if (self.isLocal()) "local" else "global";
 
         try writer.print(
             "{c} binding={s} visible={s} id={d} name={s}",
