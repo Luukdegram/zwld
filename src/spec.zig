@@ -39,6 +39,7 @@ pub const ValueType = MergedEnums(NumType, RefType);
 /// Note: This version is non-exhaustive to continue parsing
 /// when a new section is proposed but not yet implemented.
 pub const SectionType = MergedEnum(wasm.Section, &.{
+    .{ .name = "data_count", .value = 12 },
     .{ .name = "module", .value = 14 },
     .{ .name = "instance", .value = 15 },
     .{ .name = "alias", .value = 16 },

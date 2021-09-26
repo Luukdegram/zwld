@@ -91,6 +91,8 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     for (self.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
     }
+
+    try self.allocateAtoms();
 }
 
 fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void {
@@ -167,4 +169,30 @@ pub fn getMatchingSection(self: *Wasm, gpa: *Allocator, object_index: u16, secti
     };
 
     return index;
+}
+
+fn allocateAtoms(self: *Wasm) !void {
+    // iterate over all sections and the atoms that belong to that section
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const section_id: u16 = entry.key_ptr.*;
+        const section = self.sections.items[section_id];
+        var atom: *Atom = entry.value_ptr.*;
+
+        // Reverse to the first atom
+        while (atom.prev) |prev| atom = prev;
+
+        log.info("Allocating atoms in '{s}' section", .{@tagName(section.section_kind)});
+
+        // var offset = section.offset;
+        while (true) {
+            const object: *Object = &self.objects.items[atom.file];
+            const sym = &object.symtable[atom.sym_index];
+            _ = sym;
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+    }
 }

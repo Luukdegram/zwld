@@ -529,7 +529,7 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm: *
             .SYMTAB_DATA => .data,
             .SYMTAB_GLOBAL => .global,
             .SYMTAB_SECTION => continue,
-            .SYMTAB_EVENT => continue,
+            .SYMTAB_EVENT => continue, // TODO implement event section
             .SYMTAB_TABLE => .table,
         };
         const map = symbols_by_section.getPtr(sect_ty) orelse continue;
