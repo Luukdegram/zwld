@@ -82,22 +82,16 @@ pub fn main() !void {
 }
 
 fn summarizeHeaders(object: Object) !void {
-    // print("Sections:\n\n", .{});
-    // if (!object.types.isEmpty()) print("{}\n", .{object.types});
-    // if (!object.imports.isEmpty()) print("{}\n", .{object.imports});
-    // if (!object.functions.isEmpty()) print("{}\n", .{object.functions});
-    // if (!object.tables.isEmpty()) print("{}\n", .{object.tables});
-    // if (!object.memories.isEmpty()) print("{}\n", .{object.memories});
-    // if (!object.globals.isEmpty()) print("{}\n", .{object.globals});
-    // if (!object.exports.isEmpty()) print("{}\n", .{object.exports});
-    // if (!object.elements.isEmpty()) print("{}\n", .{object.elements});
-    // if (!object.code.isEmpty()) print("{}\n", .{object.code});
-    // if (!object.data.isEmpty()) print("{}\n", .{object.data});
-    // for (object.custom) |custom| {
-    //     print("{}\n", .{custom});
-    // }
-    // print("\n", .{});
-    _ = object;
+    print("Sections:\n\n", .{});
+    for (object.sections) |section, id| {
+        print("{d: >3}: {s: >10} offset(0x{x:0>8}) size(0x{x:0>8})\n", .{
+            id,
+            @tagName(section.section_kind),
+            section.offset,
+            section.size,
+        });
+    }
+    print("\n", .{});
 }
 
 fn summarizeSymbols(object: Object) !void {
