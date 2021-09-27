@@ -84,10 +84,11 @@ pub fn main() !void {
 fn summarizeHeaders(object: Object) !void {
     print("Sections:\n\n", .{});
     for (object.sections) |section, id| {
-        print("{d: >3}: {s: >10} offset(0x{x:0>8}) size(0x{x:0>8})\n", .{
+        print("{d: >3}: {s: >10} offset=0x{x:0>8} end=0x{x:0>8} size(0x{x:0>8})\n", .{
             id,
             @tagName(section.section_kind),
             section.offset,
+            section.offset + section.size,
             section.size,
         });
     }

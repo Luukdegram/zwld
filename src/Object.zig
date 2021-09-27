@@ -296,7 +296,7 @@ fn Parser(comptime ReaderType: type) type {
         /// to calculate the subsections we need to parse, as that data is not
         /// available within the section itself.
         fn parseMetadata(self: *Self, gpa: *Allocator, payload_size: usize) !void {
-            var limited = std.io.limitedReader(self.reader, payload_size);
+            var limited = std.io.limitedReader(self.reader.reader(), payload_size);
             const limited_reader = limited.reader();
 
             const version = try leb.readULEB128(u32, limited_reader);
