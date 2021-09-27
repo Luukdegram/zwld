@@ -4,6 +4,8 @@ const std = @import("std");
 const spec = @import("spec.zig");
 const Wasm = @import("Wasm.zig");
 
+const leb = std.leb;
+const log = std.log.scoped(.zwld);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 
@@ -64,8 +66,43 @@ pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptio
     writer.print("TODO print Atoms", .{});
 }
 
+/// Returns the first `Atom` from a given atom
+pub fn getFirst(self: *Atom) *Atom {
+    var tmp = self;
+    while (tmp.prev) |prev| tmp = prev;
+    return tmp;
+}
+
+/// Returns the last `Atom` from a given atom
+pub fn getLast(self: *Atom) *Atom {
+    var tmp = self;
+    while (tmp.next) |next| tmp = next;
+    return tmp;
+}
+
 pub fn resolveRelocs(self: *Atom, wasm: *Wasm) !void {
-    _ = self;
-    _ = wasm;
-    @panic("TODO: Implement resolving relocations");
+    const object = wasm.objects.items[self.file];
+    const symbol = object.symtable[self.sym_index];
+
+    log.info("Resolving relocs in atom '{s}'", .{object.resolveSymbolName(symbol)});
+
+    for (self.relocs.items) |reloc| {
+        if (reloc.relocation_type == .R_WASM_TYPE_INDEX_LEB) {
+            log.info("TODO: Support type indexed relocations", .{});
+            continue;
+        }
+
+        log.info("{s}: original: 0x{x:2>0} target: 0x{x:2>0}", .{
+            @tagName(reloc.relocation_type),
+            reloc.index,
+            self.sym_index,
+        });
+
+        // TODO: Handle relocations by type
+        leb.writeUnsignedFixed(
+            5,
+            self.code.items[reloc.offset..][0..5],
+            self.sym_index,
+        );
+    }
 }

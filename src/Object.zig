@@ -40,7 +40,7 @@ features: []const spec.Feature = &.{},
 /// the section that the list of relocations applies to.
 relocations: std.AutoArrayHashMapUnmanaged(u32, []const spec.Relocation) = .{},
 /// Table of symbols belonging to this Object file
-symtable: []const spec.SymInfo = &.{},
+symtable: []spec.SymInfo = &.{},
 /// Extra metadata about the linking section, such as alignment of segments and their name
 segment_info: []const spec.Segment = &.{},
 /// A sequence of function initializers that must be called on startup

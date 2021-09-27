@@ -6,6 +6,7 @@ const Object = @import("Object.zig");
 const spec = @import("spec.zig");
 const std = @import("std");
 
+const leb = std.leb;
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
 
@@ -22,7 +23,7 @@ globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 /// List of sections to be emitted to the binary file
 sections: std.ArrayListUnmanaged(spec.Section) = .{},
 /// A table that maps from a section to an Atom linked list
-atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
+atoms: std.AutoArrayHashMapUnmanaged(u16, *Atom) = .{},
 
 pub const SymbolWithLoc = struct {
     sym_index: u32,
@@ -93,6 +94,8 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     }
 
     try self.allocateAtoms();
+    try self.writeMagicBytes();
+    try self.writeAtoms(gpa);
 }
 
 fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void {
@@ -184,15 +187,74 @@ fn allocateAtoms(self: *Wasm) !void {
 
         log.info("Allocating atoms in '{s}' section", .{@tagName(section.section_kind)});
 
-        // var offset = section.offset;
+        var offset = @intCast(u32, section.offset);
         while (true) {
             const object: *Object = &self.objects.items[atom.file];
             const sym = &object.symtable[atom.sym_index];
-            _ = sym;
+            sym.offset = offset;
+
+            for (atom.aliases.items) |index| {
+                const alias_sym = &object.symtable[index];
+                alias_sym.offset = offset;
+            }
+
+            for (atom.contained.items) |sym_at_offset| {
+                const contained_sym = &object.symtable[sym_at_offset.local_sym_index];
+                if (contained_sym.offset) |*sym_offset| {
+                    sym_offset.* += offset;
+                } else contained_sym.offset = offset;
+            }
+
+            offset += atom.size;
 
             if (atom.next) |next| {
                 atom = next;
             } else break;
         }
+    }
+}
+
+fn writeMagicBytes(self: *Wasm) !void {
+    try self.file.writeAll(&std.wasm.magic);
+    try self.file.writer().writeIntLittle(u32, 1);
+}
+
+fn writeAtoms(self: *Wasm, gpa: *Allocator) !void {
+    const writer = self.file.writer();
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const section_id = entry.key_ptr.*;
+        const section = self.sections.items[section_id];
+        log.info("Writing section: {d}({s})", .{
+            section_id,
+            @tagName(section.section_kind),
+        });
+        var atom: *Atom = entry.value_ptr.*.getFirst();
+
+        // calculate the amount of items in the section
+        var count: u32 = 0;
+        var code = std.ArrayList(u8).init(gpa);
+        defer code.deinit();
+
+        while (true) {
+            // const object = self.objects.items[atom.file];
+            // const sym = object.symtable.items[atom.sym_index];
+
+            var fbs = std.io.fixedBufferStream(atom.code.items);
+            const reader = fbs.reader();
+
+            try atom.resolveRelocs(self);
+            count += try leb.readULEB128(u32, reader);
+            try code.appendSlice(atom.code.items[fbs.pos..]);
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+
+        try writer.writeByte(@enumToInt(section.section_kind));
+        try leb.writeULEB128(writer, code.items.len + 1);
+        try leb.writeULEB128(writer, count);
+        try writer.writeAll(code.items);
     }
 }
