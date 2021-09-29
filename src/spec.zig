@@ -401,6 +401,8 @@ pub const SymInfo = struct {
     /// Set when the symbol is defined, can be zero and must be smaller than segment's
     /// size where offset + size.
     size: ?u32 = null,
+    /// Index into the symbol table of the output file.
+    output_index: u32 = undefined,
 
     pub fn hasFlag(self: SymInfo, flag: SymbolFlag) bool {
         return self.flags & @enumToInt(flag) != 0;

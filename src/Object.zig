@@ -25,9 +25,28 @@ file: ?std.fs.File = null,
 /// Name (read path) of the object file.
 name: []const u8,
 /// A list of all sections this module contains.
+/// This contains metadata such as offset, size, type and the contents in bytes.
 sections: []const spec.Section = &.{},
+/// Parsed type section
+types: []const spec.sections.Type = &.{},
 /// A list of all imports for this module
 imports: []const spec.sections.Import = &.{},
+/// Parsed function section
+functions: []const spec.sections.Func = &.{},
+/// Parsed table section
+tables: []const spec.sections.Table = &.{},
+/// Parsed memory section
+memories: []const spec.sections.Memory = &.{},
+/// Parsed global section
+globals: []const spec.sections.Global = &.{},
+/// Parsed export section
+globals: []const spec.sections.Export = &.{},
+/// Parsed element section
+globals: []const spec.sections.Element = &.{},
+/// Parsed code section
+code: []const []u8,
+/// Parsed data section
+globals: []const spec.sections.Data = &.{},
 /// Represents the function ID that must be called on startup.
 /// This is `null` by default as runtimes may determine the startup
 /// function themselves. This is essentially legacy.
@@ -94,6 +113,8 @@ pub fn resolveSymbolName(self: Object, symbol: spec.SymInfo) []const u8 {
     if (symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME) or !symbol.isUndefined()) {
         return symbol.name;
     }
+    // Symbols that refer to a section do not have a name
+    if (symbol.kind == .SYMTAB_SECTION) return "";
     // in other case we take name from import
     return self.imports[symbol.index.?].name;
 }
@@ -142,6 +163,8 @@ fn Parser(comptime ReaderType: type) type {
         reader: std.io.CountingReader(ReaderType),
         /// Object file we're building
         object: *Object,
+        /// The currently parsed sections
+        sections: std.ArrayListUnmanaged(spec.Section) = .{},
 
         fn init(object: *Object, reader: ReaderType) Self {
             return .{ .object = object, .reader = std.io.countingReader(reader) };
@@ -153,7 +176,7 @@ fn Parser(comptime ReaderType: type) type {
 
             try self.reader.reader().readNoEof(&magic_bytes);
             if (!std.mem.eql(u8, &magic_bytes, &std.wasm.magic)) {
-                log.info("Invalid magic bytes '{s}'", .{&magic_bytes});
+                log.debug("Invalid magic bytes '{s}'", .{&magic_bytes});
                 return error.InvalidMagicByte;
             }
         }
@@ -164,12 +187,9 @@ fn Parser(comptime ReaderType: type) type {
 
             self.object.version = version;
 
-            var sections = std.ArrayList(spec.Section).init(gpa);
-            defer sections.deinit();
-
             while (self.reader.reader().readByte()) |byte| {
                 const len = try readLeb(u32, self.reader.reader());
-                try sections.append(.{
+                try self.sections.append(gpa, .{
                     .offset = self.reader.bytes_read,
                     .size = len,
                     .section_kind = @intToEnum(spec.SectionType, byte),
@@ -234,7 +254,7 @@ fn Parser(comptime ReaderType: type) type {
                 error.EndOfStream => {}, // finished parsing the file
                 else => |e| return e,
             }
-            self.object.sections = sections.toOwnedSlice();
+            self.object.sections = self.sections.toOwnedSlice(gpa);
         }
 
         /// Based on the "features" custom section, parses it into a list of
@@ -255,7 +275,7 @@ fn Parser(comptime ReaderType: type) type {
                 };
 
                 if (!spec.known_features.has(name)) {
-                    log.info("Detected unknown feature: {s}", .{name});
+                    log.debug("Detected unknown feature: {s}", .{name});
                 }
             }
         }
@@ -269,7 +289,11 @@ fn Parser(comptime ReaderType: type) type {
             const count = try leb.readULEB128(u32, reader);
             const relocations = try gpa.alloc(spec.Relocation, count);
 
-            log.info("Found {d} relocations for section index {d}", .{ count, section });
+            log.debug("Found {d} relocations for section ({d}): {s}", .{
+                count,
+                section,
+                @tagName(self.sections.items[section].section_kind),
+            });
 
             for (relocations) |*relocation| {
                 const rel_type = try leb.readULEB128(u8, reader);
@@ -280,7 +304,7 @@ fn Parser(comptime ReaderType: type) type {
                     .index = try leb.readULEB128(u32, reader),
                     .addend = if (rel_type_enum.addendIsPresent()) try leb.readULEB128(u32, reader) else null,
                 };
-                log.info("Found relocation: type({s}) offset({d}) index({d}) addend({d})", .{
+                log.debug("Found relocation: type({s}) offset({d}) index({d}) addend({d})", .{
                     @tagName(relocation.relocation_type),
                     relocation.offset,
                     relocation.index,
@@ -300,7 +324,7 @@ fn Parser(comptime ReaderType: type) type {
             const limited_reader = limited.reader();
 
             const version = try leb.readULEB128(u32, limited_reader);
-            log.info("Link meta data version: {d}", .{version});
+            log.debug("Link meta data version: {d}", .{version});
             if (version != 2) return error.UnsupportedVersion;
 
             while (limited.bytes_left > 0) {
@@ -316,7 +340,7 @@ fn Parser(comptime ReaderType: type) type {
         /// such as access to the `import` section to find the name of a symbol.
         fn parseSubsection(self: *Self, gpa: *Allocator, reader: anytype) !void {
             const sub_type = try leb.readULEB128(u8, reader);
-            log.info("Found subsection: {s}", .{@tagName(@intToEnum(spec.SubsectionType, sub_type))});
+            log.debug("Found subsection: {s}", .{@tagName(@intToEnum(spec.SubsectionType, sub_type))});
             const payload_len = try leb.readULEB128(u32, reader);
             if (payload_len == 0) return;
 
@@ -338,7 +362,7 @@ fn Parser(comptime ReaderType: type) type {
                             .alignment = try leb.readULEB128(u32, reader),
                             .flags = try leb.readULEB128(u32, reader),
                         };
-                        log.info("Found segment: {s} align({d}) flags({b})", .{
+                        log.debug("Found segment: {s} align({d}) flags({b})", .{
                             segment.name,
                             segment.alignment,
                             segment.flags,
@@ -353,7 +377,7 @@ fn Parser(comptime ReaderType: type) type {
                             .priority = try leb.readULEB128(u32, reader),
                             .symbol_index = try leb.readULEB128(u32, reader),
                         };
-                        log.info("Found function - prio: {d}, index: {d}", .{ func.priority, func.symbol_index });
+                        log.debug("Found function - prio: {d}, index: {d}", .{ func.priority, func.symbol_index });
                     }
                     self.object.init_funcs = funcs;
                 },
@@ -392,7 +416,7 @@ fn Parser(comptime ReaderType: type) type {
                     for (symbols) |*symbol| {
                         symbol.* = try parseSymbol(gpa, reader);
 
-                        log.info("Found symbol: type({s}) name({s}) flags(0x{x})", .{
+                        log.debug("Found symbol: type({s}) name({s}) flags(0x{x})", .{
                             @tagName(symbol.kind),
                             self.object.resolveSymbolName(symbol.*),
                             symbol.flags,
@@ -537,7 +561,7 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm: *
     }
 
     for (self.sections) |section, idx| {
-        log.info("Parsing section '{s}'", .{@tagName(section.section_kind)});
+        log.debug("Parsing section '{s}'", .{@tagName(section.section_kind)});
 
         const wasm_section_index = (try wasm.getMatchingSection(gpa, object_index, @intCast(u16, idx))) orelse continue;
 

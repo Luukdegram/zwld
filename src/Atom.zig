@@ -84,18 +84,21 @@ pub fn resolveRelocs(self: *Atom, wasm: *Wasm) !void {
     const object = wasm.objects.items[self.file];
     const symbol = object.symtable[self.sym_index];
 
-    log.info("Resolving relocs in atom '{s}'", .{object.resolveSymbolName(symbol)});
+    log.debug("Resolving relocs in atom '{s}' count({d})", .{
+        object.resolveSymbolName(symbol),
+        self.relocs.items.len,
+    });
 
     for (self.relocs.items) |reloc| {
         if (reloc.relocation_type == .R_WASM_TYPE_INDEX_LEB) {
-            log.info("TODO: Support type indexed relocations", .{});
+            log.debug("TODO: Support type indexed relocations", .{});
             continue;
         }
 
-        log.info("{s}: original: 0x{x:2>0} target: 0x{x:2>0}", .{
+        log.debug("{s}: symbol: 0x{x:2>0} target: 0x{x:2>0}", .{
             @tagName(reloc.relocation_type),
             reloc.index,
-            self.sym_index,
+            symbol.index,
         });
 
         // TODO: Handle relocations by type

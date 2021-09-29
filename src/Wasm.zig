@@ -24,6 +24,11 @@ globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 sections: std.ArrayListUnmanaged(spec.Section) = .{},
 /// A table that maps from a section to an Atom linked list
 atoms: std.AutoArrayHashMapUnmanaged(u16, *Atom) = .{},
+/// Output function signature types
+types: std.ArrayListUnmanaged(spec.sections.Type) = .{},
+/// A list of all symbols, which is used to map from object file
+/// specified symbols to their index into this table.
+symtab: std.ArrayListUnmanaged(spec.SymInfo) = .{},
 
 pub const SymbolWithLoc = struct {
     sym_index: u32,
@@ -98,10 +103,49 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.writeAtoms(gpa);
 }
 
+fn populateSymbolTable(self: *Wasm, gpa: *Allocator) !void {
+    for (self.objects.items) |object| {
+        for (object.symtable) |symbol| {
+            const index = @intCast(u32, self.symtab.items.len);
+            symbol.output_index = index;
+            self.symtab.append(gpa, symbol);
+        }
+    }
+}
+
+fn sortSections(lhs: spec.Section, rhs: spec.Section) bool {
+    if (rhs.section_kind == .custom) return false;
+    const lhs_idx = @enumToInt(lhs.section_kind);
+    const rhs_idx = @enumToInt(rhs.section_kind);
+
+    if (rhs.section_kind == .data_count and lhs_idx >= @enumToInt(spec.SectionType.code)) {
+        return true;
+    }
+    return rhs_idx < lhs_idx;
+}
+
+/// Finds all used sections from each object file, and then 
+fn buildSections(self: *Wasm, gpa: *Allocator, object_id: u16) !void {
+    const object: Object = self.objects.items[object_id];
+    for (object.sections) |obj_section, section_id| {
+        switch (obj_section.section_kind) {
+            .custom,
+            .data_count,
+            .data,
+            => continue,
+            else => {},
+        }
+        const index = (try getMatchingSection(gpa, object_id, section_id)) orelse continue;
+        const section: *spec.Section = &self.sections.items[index];
+        section.size += obj_section.size;
+        section.count += obj_section.count;
+    }
+}
+
 fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void {
     const object: Object = self.objects.items[object_index];
 
-    log.info("resolving symbols in {s}", .{object.name});
+    log.debug("resolving symbols in {s}", .{object.name});
 
     for (object.symtable) |symbol, i| {
         const sym_idx = @intCast(u32, i);
@@ -134,7 +178,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
                 }
 
                 if (symbol.isWeak()) {
-                    log.info("symbol '{s}' already defined; skipping...", .{name});
+                    log.debug("symbol '{s}' already defined; skipping...", .{name});
                     continue;
                 }
             }
@@ -149,7 +193,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
     }
 }
 
-/// Returns the index of a section within the final binary file based on a given object index
+/// Returns the index of a section based on a given object index
 /// and section index. When the section does not yet exist in the wasm binary file, it will create
 /// one and return its index.
 pub fn getMatchingSection(self: *Wasm, gpa: *Allocator, object_index: u16, section_index: u16) !?u16 {
@@ -180,12 +224,9 @@ fn allocateAtoms(self: *Wasm) !void {
     while (it.next()) |entry| {
         const section_id: u16 = entry.key_ptr.*;
         const section = self.sections.items[section_id];
-        var atom: *Atom = entry.value_ptr.*;
+        var atom: *Atom = entry.value_ptr.*.getFirst();
 
-        // Reverse to the first atom
-        while (atom.prev) |prev| atom = prev;
-
-        log.info("Allocating atoms in '{s}' section", .{@tagName(section.section_kind)});
+        log.debug("Allocating atoms in '{s}' section", .{@tagName(section.section_kind)});
 
         var offset = @intCast(u32, section.offset);
         while (true) {
@@ -225,7 +266,7 @@ fn writeAtoms(self: *Wasm, gpa: *Allocator) !void {
     while (it.next()) |entry| {
         const section_id = entry.key_ptr.*;
         const section = self.sections.items[section_id];
-        log.info("Writing section: {d}({s})", .{
+        log.debug("Writing section: {d}({s})", .{
             section_id,
             @tagName(section.section_kind),
         });
