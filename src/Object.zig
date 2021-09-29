@@ -40,13 +40,13 @@ memories: []const spec.sections.Memory = &.{},
 /// Parsed global section
 globals: []const spec.sections.Global = &.{},
 /// Parsed export section
-globals: []const spec.sections.Export = &.{},
+exports: []const spec.sections.Export = &.{},
 /// Parsed element section
-globals: []const spec.sections.Element = &.{},
+elements: []const spec.sections.Element = &.{},
 /// Parsed code section
-code: []const []u8,
+code: []const []u8 = &.{},
 /// Parsed data section
-globals: []const spec.sections.Data = &.{},
+data: []const spec.sections.Data = &.{},
 /// Represents the function ID that must be called on startup.
 /// This is `null` by default as runtimes may determine the startup
 /// function themselves. This is essentially legacy.
@@ -194,12 +194,12 @@ fn Parser(comptime ReaderType: type) type {
                     .size = len,
                     .section_kind = @intToEnum(spec.SectionType, byte),
                 });
+                const reader = std.io.limitedReader(self.reader.reader(), len).reader();
 
                 // We only parse extra information when it's a custom section
                 // or an import section. All other sections we simply skip till the end.
                 switch (@intToEnum(spec.SectionType, byte)) {
                     .custom => {
-                        const reader = std.io.limitedReader(self.reader.reader(), len).reader();
                         const name_len = try readLeb(u32, reader);
                         const name = try gpa.alloc(u8, name_len);
                         defer gpa.free(name);
@@ -215,8 +215,21 @@ fn Parser(comptime ReaderType: type) type {
                             try reader.skipBytes(reader.context.bytes_left, .{});
                         }
                     },
+                    .type => {
+                        for (try readVec(&self.object.types, reader, gpa)) |*type_val| {
+                            if ((try reader.readByte()) != std.wasm.function_type) return error.ExpectedFuncType;
+
+                            for (try readVec(&type_val.params, reader, gpa)) |*param| {
+                                param.* = try readEnum(spec.ValueType, reader);
+                            }
+
+                            for (try readVec(&type_val.returns, reader, gpa)) |*result| {
+                                result.* = try readEnum(spec.ValueType, reader);
+                            }
+                        }
+                        try assertEnd(reader);
+                    },
                     .import => {
-                        const reader = self.reader.reader();
                         for (try readVec(&self.object.imports, reader, gpa)) |*import| {
                             const module_len = try readLeb(u32, reader);
                             const module_name = try gpa.alloc(u8, module_len);
@@ -245,6 +258,73 @@ fn Parser(comptime ReaderType: type) type {
                                 .name = name,
                                 .kind = kind_value,
                             };
+                        }
+                        try assertEnd(reader);
+                    },
+                    .function => {
+                        for (try readVec(&self.object.functions, reader, gpa)) |*func| {
+                            func.type_idx = try readEnum(spec.indexes.Type, reader);
+                        }
+                        try assertEnd(reader);
+                    },
+                    .table => {
+                        for (try readVec(&self.object.tables, reader, gpa)) |*table| {
+                            table.* = .{
+                                .reftype = try readEnum(spec.RefType, reader),
+                                .limits = try readLimits(reader),
+                            };
+                        }
+                        try assertEnd(reader);
+                    },
+                    .memory => {
+                        for (try readVec(&self.object.memories, reader, gpa)) |*memory| {
+                            memory.* = .{ .limits = try readLimits(reader) };
+                        }
+                        try assertEnd(reader);
+                    },
+                    .global => {
+                        for (try readVec(&self.object.globals, reader, gpa)) |*global| {
+                            global.* = .{
+                                .valtype = try readEnum(spec.ValueType, reader),
+                                .mutable = (try reader.readByte()) == 0x01,
+                                .init = try readInit(reader),
+                            };
+                        }
+                        try assertEnd(reader);
+                    },
+                    .@"export" => {
+                        for (try readVec(&self.object.exports, reader, gpa)) |*exp| {
+                            const name_len = try readLeb(u32, reader);
+                            const name = try gpa.alloc(u8, name_len);
+                            try reader.readNoEof(name);
+                            exp.* = .{
+                                .name = name,
+                                .kind = try readEnum(spec.ExternalType, reader),
+                                .index = try readLeb(u32, reader),
+                            };
+                        }
+                        try assertEnd(reader);
+                    },
+                    .start => {
+                        self.object.start = try readEnum(spec.indexes.Func, reader);
+                        try assertEnd(reader);
+                    },
+                    .element => {
+                        for (try readVec(&self.object.elements, reader, gpa)) |*elem| {
+                            elem.table_idx = try readEnum(spec.indexes.Table, reader);
+                            elem.offset = try readInit(reader);
+
+                            for (try readVec(&elem.func_idxs, reader, gpa)) |*idx| {
+                                idx.* = try readEnum(spec.indexes.Func, reader);
+                            }
+                        }
+                        try assertEnd(reader);
+                    },
+                    .code => {
+                        for (try readVec(&self.object.code, reader, gpa)) |*code| {
+                            const code_len = try readLeb(u32, reader);
+                            code.* = try gpa.alloc(u8, code_len);
+                            try reader.readNoEof(code.*);
                         }
                     },
                     else => try self.reader.reader().skipBytes(len, .{}),

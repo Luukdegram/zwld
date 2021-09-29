@@ -19,16 +19,34 @@ objects: std.ArrayListUnmanaged(Object) = .{},
 /// A list of references to atoms
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// A map of global names to their symbol location in an object file
-globals: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 /// List of sections to be emitted to the binary file
 sections: std.ArrayListUnmanaged(spec.Section) = .{},
 /// A table that maps from a section to an Atom linked list
 atoms: std.AutoArrayHashMapUnmanaged(u16, *Atom) = .{},
-/// Output function signature types
-types: std.ArrayListUnmanaged(spec.sections.Type) = .{},
 /// A list of all symbols, which is used to map from object file
 /// specified symbols to their index into this table.
 symtab: std.ArrayListUnmanaged(spec.SymInfo) = .{},
+
+// SECTIONS //
+/// Output function signature types
+types: std.ArrayListUnmanaged(spec.sections.Type) = .{},
+/// Output import section
+imports: std.ArrayListUnmanaged(spec.sections.Import) = .{},
+/// Output function section
+functions: std.ArrayListUnmanaged(spec.sections.Func) = .{},
+/// Output table section
+tables: std.ArrayListUnmanaged(spec.sections.Table) = .{},
+/// Output memory section
+memories: std.ArrayListUnmanaged(spec.sections.Memory) = .{},
+/// Output global section
+globals: std.ArrayListUnmanaged(spec.sections.Global) = .{},
+/// Output export section
+exports: std.ArrayListUnmanaged(spec.sections.Export) = .{},
+/// Output element section
+elements: std.ArrayListUnmanaged(spec.sections.Element) = .{},
+/// Output code section
+code: std.ArrayListUnmanaged([]u8) = .{},
 
 pub const SymbolWithLoc = struct {
     sym_index: u32,
@@ -59,10 +77,10 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
         object.file.?.close();
         object.deinit(gpa);
     }
-    for (self.globals.keys()) |name| {
+    for (self.global_symbols.keys()) |name| {
         gpa.free(name);
     }
-    self.globals.deinit(gpa);
+    self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
     self.sections.deinit(gpa);
     self.file.close();
@@ -88,17 +106,19 @@ pub fn addObjects(self: *Wasm, gpa: *Allocator, file_paths: []const []const u8) 
 /// Flushes the `Wasm` construct into a final wasm binary by linking
 /// the objects, ensuring the final binary file has no collisions.
 pub fn flush(self: *Wasm, gpa: *Allocator) !void {
-    _ = self;
-
     for (self.objects.items) |_, obj_idx| {
         try self.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
 
-    for (self.objects.items) |*object, obj_idx| {
-        try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
-    }
+    // for (self.objects.items) |object| {
+    //     try self.buildSections(gpa, object);
+    // }
 
-    try self.allocateAtoms();
+    // for (self.objects.items) |*object, obj_idx| {
+    //     try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
+    // }
+
+    // try self.allocateAtoms();
     try self.writeMagicBytes();
     try self.writeAtoms(gpa);
 }
@@ -112,6 +132,11 @@ fn populateSymbolTable(self: *Wasm, gpa: *Allocator) !void {
         }
     }
 }
+
+// fn buildRelocations(self: *Wasm, gpa: *Allocator, object_id: u16) !void {
+// const object: *Object = self.objects.items[object_id];
+// const types = object.types;
+// }
 
 fn sortSections(lhs: spec.Section, rhs: spec.Section) bool {
     if (rhs.section_kind == .custom) return false;
@@ -152,7 +177,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
 
         if (symbol.isWeak() or symbol.isGlobal()) {
             const name = try gpa.dupe(u8, object.resolveSymbolName(symbol));
-            const result = try self.globals.getOrPut(gpa, name);
+            const result = try self.global_symbols.getOrPut(gpa, name);
             defer if (result.found_existing) gpa.free(name);
 
             log.debug("Found symbol '{s}'", .{name});
