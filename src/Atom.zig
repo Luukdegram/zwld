@@ -85,7 +85,7 @@ pub fn resolveRelocs(self: *Atom, wasm: *Wasm) !void {
     const symbol = object.symtable[self.sym_index];
 
     log.debug("Resolving relocs in atom '{s}' count({d})", .{
-        object.resolveSymbolName(symbol),
+        symbol.name,
         self.relocs.items.len,
     });
 
@@ -98,7 +98,7 @@ pub fn resolveRelocs(self: *Atom, wasm: *Wasm) !void {
         log.debug("{s}: symbol: 0x{x:2>0} target: 0x{x:2>0}", .{
             @tagName(reloc.relocation_type),
             reloc.index,
-            symbol.index,
+            symbol.index(),
         });
 
         // TODO: Handle relocations by type

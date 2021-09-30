@@ -383,60 +383,110 @@ pub const Comdat = struct {
     symbols: []const ComdatSym,
 };
 
-pub const SymInfo = struct {
-    kind: Type,
+pub const Symbol = struct {
     /// Bitfield containings flags for a symbol
     /// Can contain any of the flags defined in `SymbolFlag`
     flags: u32,
-    /// The index of the Wasm object corresponding to the symbol.
-    /// When `WASM_SYM_UNDEFINED` flag is set, this refers to an import.
-    /// Can be `null` when it refers to a data symbol that is undefined.
-    index: ?u32 = null,
-    /// Name of the symbol. When the symbol references to an import, it will
-    /// use the import's name, unless `WASM_SYM_EXPLICIT_NAME` is set.
-    name: []const u8 = &.{},
-    /// Offset within the segment. Must be smaller than segment's size, and is only
-    /// set when the symbol is defined.
-    offset: ?u32 = null,
-    /// Set when the symbol is defined, can be zero and must be smaller than segment's
-    /// size where offset + size.
-    size: ?u32 = null,
-    /// Index into the symbol table of the output file.
+    /// Symbol name, when undefined this will be taken from the import.
+    name: []const u8,
+    /// Index into the symbol table of the final file
+    /// It's illegal to read this before it's set.
     output_index: u32 = undefined,
+    /// An union that represents both the type of symbol
+    /// as well as the data it holds.
+    kind: Kind,
 
-    pub fn hasFlag(self: SymInfo, flag: SymbolFlag) bool {
+    pub const Kind = union(enum) {
+        function: Function,
+        data: Data,
+        global: Global,
+        section: u32,
+        event: Event,
+        table: Table,
+
+        pub const Tag = std.meta.Tag(Kind);
+    };
+
+    /// Attempts to unwrap a symbol based on a given expected `Kind`.
+    /// When the kind is not the active tag of the symbol, this returns null.
+    pub fn unwrapAs(self: Symbol, comptime kind: Kind.Tag) ?std.meta.TagPayload(Kind, kind) {
+        if (std.meta.activeTag(self.kind) != kind) return null;
+
+        return @field(self, @tagName(kind));
+    }
+
+    /// Returns the index the symbol points to.
+    /// In case of a data symbol, this can result into `null`.
+    pub fn index(self: Symbol) ?u32 {
+        return switch (self.kind) {
+            .function => |func| func.index,
+            .data => |data| data.index,
+            .global => |global| global.index,
+            .section => |section| section,
+            .event => |event| event.index,
+            .table => |table| table.index,
+        };
+    }
+
+    pub const Data = struct {
+        index: ?u32 = null,
+        offset: ?u32 = null,
+        size: ?u32 = null,
+    };
+
+    pub const Global = struct {
+        index: u32,
+    };
+
+    pub const Function = struct {
+        index: u32,
+        /// will be equal to `index` in the case of a defined function,
+        /// else it will be set based on an import later on.
+        /// Reading before it is set is illegal.
+        function_index: u32 = undefined,
+    };
+
+    pub const Event = struct {
+        index: u32,
+    };
+
+    pub const Table = struct {
+        index: u32,
+    };
+
+    pub fn hasFlag(self: Symbol, flag: SymbolFlag) bool {
         return self.flags & @enumToInt(flag) != 0;
     }
 
-    pub fn setFlag(self: *SymInfo, flag: SymbolFlag) void {
+    pub fn setFlag(self: *Symbol, flag: SymbolFlag) void {
         self.flags |= @enumToInt(flag);
     }
 
-    pub fn isUndefined(self: SymInfo) bool {
+    pub fn isUndefined(self: Symbol) bool {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_UNDEFINED) != 0;
     }
 
-    pub fn isVisible(self: SymInfo) bool {
+    pub fn isVisible(self: Symbol) bool {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_VISIBILITY_HIDDEN) == 0;
     }
 
-    pub fn isLocal(self: SymInfo) bool {
+    pub fn isLocal(self: Symbol) bool {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_BINDING_LOCAL) != 0;
     }
 
-    pub fn isGlobal(self: SymInfo) bool {
+    pub fn isGlobal(self: Symbol) bool {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_BINDING_LOCAL) == 0;
     }
 
-    pub fn isExported(self: SymInfo) bool {
+    pub fn isExported(self: Symbol) bool {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_EXPORTED) != 0;
     }
 
-    pub fn isWeak(self: SymInfo) bool {
+    pub fn isWeak(self: Symbol) bool {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_BINDING_WEAK) != 0;
     }
 
-    pub fn eqlBinding(self: SymInfo, other: SymInfo) bool {
+    pub fn eqlBinding(self: Symbol, other: Symbol) bool {
         if (self.isLocal() != other.isLocal()) {
             return false;
         }
@@ -446,35 +496,25 @@ pub const SymInfo = struct {
         return true;
     }
 
-    pub const Type = enum(u8) {
-        SYMTAB_FUNCTION = 0,
-        SYMTAB_DATA = 1,
-        SYMTAB_GLOBAL = 2,
-        SYMTAB_SECTION = 3,
-        SYMTAB_EVENT = 4,
-        SYMTAB_TABLE = 5,
-    };
-
     /// Formats the symbol into human-readable text
-    pub fn format(self: SymInfo, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Symbol, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
 
         const kind_fmt: u8 = switch (self.kind) {
-            .SYMTAB_FUNCTION => 'F',
-            .SYMTAB_DATA => 'D',
-            .SYMTAB_GLOBAL => 'G',
-            .SYMTAB_SECTION => 'S',
-            .SYMTAB_EVENT => 'E',
-            .SYMTAB_TABLE => 'T',
+            .function => 'F',
+            .data => 'D',
+            .global => 'G',
+            .section => 'S',
+            .event => 'E',
+            .table => 'T',
         };
         const visible: []const u8 = if (self.isVisible()) "yes" else "no";
-        const sym_binding: []const u8 = if (self.isLocal()) "local" else "global";
-        const name: []const u8 = if (self.name.len == 0) "<import>" else self.name;
+        const binding: []const u8 = if (self.isLocal()) "local" else "global";
 
         try writer.print(
             "{c} binding={s} visible={s} id={d} name={s}",
-            .{ kind_fmt, sym_binding, visible, self.index, name },
+            .{ kind_fmt, binding, visible, self.index(), self.name },
         );
     }
 };

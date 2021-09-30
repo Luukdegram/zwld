@@ -26,7 +26,7 @@ sections: std.ArrayListUnmanaged(spec.Section) = .{},
 atoms: std.AutoArrayHashMapUnmanaged(u16, *Atom) = .{},
 /// A list of all symbols, which is used to map from object file
 /// specified symbols to their index into this table.
-symtab: std.ArrayListUnmanaged(spec.SymInfo) = .{},
+symtab: std.ArrayListUnmanaged(spec.Symbol) = .{},
 
 // SECTIONS //
 /// Output function signature types
@@ -47,6 +47,16 @@ exports: std.ArrayListUnmanaged(spec.sections.Export) = .{},
 elements: std.ArrayListUnmanaged(spec.sections.Element) = .{},
 /// Output code section
 code: std.ArrayListUnmanaged([]u8) = .{},
+
+/// Table where the key is represented by an import.
+/// Each entry represents a function, and maps to the index within the list
+/// of imports.
+// imported_functions: std.AutoHashMapUnmanaged(ImportKey, u32) = .{},
+
+const ImportKey = struct {
+    module_name: []const u8,
+    name: []const u8,
+};
 
 pub const SymbolWithLoc = struct {
     sym_index: u32,
@@ -176,7 +186,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
         const sym_idx = @intCast(u32, i);
 
         if (symbol.isWeak() or symbol.isGlobal()) {
-            const name = try gpa.dupe(u8, object.resolveSymbolName(symbol));
+            const name = try gpa.dupe(u8, symbol.name);
             const result = try self.global_symbols.getOrPut(gpa, name);
             defer if (result.found_existing) gpa.free(name);
 
@@ -215,6 +225,13 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
                 .file = object_index,
             };
         }
+
+        // Check if they should be imported, if so: add them to the import section.
+        // if (symbol.import()) {
+        //     const import_index = @intCast(u32, self.imports.items.len);
+        //     symbol.index = import_index;
+        //     self.imports.append(gpa, .{});
+        // }
     }
 }
 
@@ -241,6 +258,30 @@ pub fn getMatchingSection(self: *Wasm, gpa: *Allocator, object_index: u16, secti
     };
 
     return index;
+}
+
+fn appendImportSymbol(self: *Wasm, gpa: *Allocator, object_id: u16, symbol_id: u32) !void {
+    const object: *Object = self.objects.items[object_id];
+    const symbol = &object.symtable[symbol_id];
+    const import = object.imports[symbol.index];
+    const module_name = import.module_name;
+    const import_name = import.name;
+
+    switch (symbol.kind) {
+        .function => |*func| {
+            const func_type = object.types[import.kind.function];
+            _ = func_type;
+            const ret = try self.imported_functions.getOrPut(gpa, .{
+                .module_name = module_name,
+                .name = import_name,
+            });
+            const import_index = if (ret.found_existing)
+                ret.value_ptr.*
+            else
+                @intCast(u32, self.imported_functions.count() - 1);
+            func.function_index = import_index;
+        },
+    }
 }
 
 fn allocateAtoms(self: *Wasm) !void {

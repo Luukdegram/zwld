@@ -59,7 +59,7 @@ features: []const spec.Feature = &.{},
 /// the section that the list of relocations applies to.
 relocations: std.AutoArrayHashMapUnmanaged(u32, []const spec.Relocation) = .{},
 /// Table of symbols belonging to this Object file
-symtable: []spec.SymInfo = &.{},
+symtable: []spec.Symbol = &.{},
 /// Extra metadata about the linking section, such as alignment of segments and their name
 segment_info: []const spec.Segment = &.{},
 /// A sequence of function initializers that must be called on startup
@@ -101,22 +101,6 @@ pub fn sectionByType(self: *Object, section_type: spec.SectionType) ?spec.Sectio
             break section;
         }
     } else null;
-}
-
-/// Resolves a symbol name by either returning the name of a symbol itself,
-/// or in case of an import, parses the imports section and returns the name
-/// of the import at the index specified by the symbol.
-///
-/// Memory is owned by the caller and must be freed manually
-pub fn resolveSymbolName(self: Object, symbol: spec.SymInfo) []const u8 {
-    // When not an import or an import with explicit name set, use symbol name
-    if (symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME) or !symbol.isUndefined()) {
-        return symbol.name;
-    }
-    // Symbols that refer to a section do not have a name
-    if (symbol.kind == .SYMTAB_SECTION) return "";
-    // in other case we take name from import
-    return self.imports[symbol.index.?].name;
 }
 
 /// Error set containing parsing errors.
@@ -492,13 +476,13 @@ fn Parser(comptime ReaderType: type) type {
                     self.object.comdat_info = comdats;
                 },
                 .WASM_SYMBOL_TABLE => {
-                    const symbols = try gpa.alloc(spec.SymInfo, count);
+                    const symbols = try gpa.alloc(spec.Symbol, count);
                     for (symbols) |*symbol| {
-                        symbol.* = try parseSymbol(gpa, reader);
+                        symbol.* = try self.parseSymbol(gpa, reader);
 
                         log.debug("Found symbol: type({s}) name({s}) flags(0x{x})", .{
                             @tagName(symbol.kind),
-                            self.object.resolveSymbolName(symbol.*),
+                            symbol.name,
                             symbol.flags,
                         });
                     }
@@ -511,33 +495,36 @@ fn Parser(comptime ReaderType: type) type {
         /// Parses the symbol information based on its kind,
         /// requires access to `Object` to find the name of a symbol when it's
         /// an import and flag `WASM_SYM_EXPLICIT_NAME` is not set.
-        fn parseSymbol(gpa: *Allocator, reader: anytype) !spec.SymInfo {
-            const kind = @intToEnum(spec.SymInfo.Type, try leb.readULEB128(u8, reader));
+        fn parseSymbol(self: *Self, gpa: *Allocator, reader: anytype) !spec.Symbol {
+            const kind = @intToEnum(spec.Symbol.Kind.Tag, try leb.readULEB128(u8, reader));
             const flags = try leb.readULEB128(u32, reader);
-            var symbol: spec.SymInfo = .{
-                .kind = kind,
+            var symbol: spec.Symbol = .{
                 .flags = flags,
+                .kind = undefined,
+                .name = undefined,
             };
 
             switch (kind) {
-                .SYMTAB_DATA => {
+                .data => {
                     const name_len = try leb.readULEB128(u32, reader);
                     const name = try gpa.alloc(u8, name_len);
                     try reader.readNoEof(name);
                     symbol.name = name;
+                    symbol.kind = .{ .data = .{} };
 
                     // Data symbols only have the following fields if the symbol is defined
                     if (!symbol.hasFlag(.WASM_SYM_UNDEFINED)) {
-                        symbol.index = try leb.readULEB128(u32, reader);
-                        symbol.offset = try leb.readULEB128(u32, reader);
-                        symbol.size = try leb.readULEB128(u32, reader);
+                        symbol.kind.data.index = try leb.readULEB128(u32, reader);
+                        symbol.kind.data.offset = try leb.readULEB128(u32, reader);
+                        symbol.kind.data.size = try leb.readULEB128(u32, reader);
                     }
                 },
-                .SYMTAB_SECTION => {
-                    symbol.index = try leb.readULEB128(u32, reader);
+                .section => {
+                    symbol.kind = .{ .section = try leb.readULEB128(u32, reader) };
+                    symbol.name = @tagName(symbol.kind);
                 },
-                else => {
-                    symbol.index = try leb.readULEB128(u32, reader);
+                else => |tag| {
+                    const index = try leb.readULEB128(u32, reader);
 
                     const is_import = symbol.hasFlag(.WASM_SYM_UNDEFINED);
                     const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
@@ -546,7 +533,20 @@ fn Parser(comptime ReaderType: type) type {
                         const name = try gpa.alloc(u8, name_len);
                         try reader.readNoEof(name);
                         symbol.name = name;
+                    } else {
+                        symbol.name = self.object.imports[index].name;
                     }
+
+                    symbol.kind = switch (tag) {
+                        .function => .{ .function = .{
+                            .index = index,
+                            .function_index = if (!is_import) index else undefined,
+                        } },
+                        .global => .{ .global = .{ .index = index } },
+                        .event => .{ .event = .{ .index = index } },
+                        .table => .{ .table = .{ .index = index } },
+                        else => unreachable,
+                    };
                 },
             }
             return symbol;
