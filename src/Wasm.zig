@@ -51,11 +51,35 @@ code: std.ArrayListUnmanaged([]u8) = .{},
 /// Table where the key is represented by an import.
 /// Each entry represents a function, and maps to the index within the list
 /// of imports.
-// imported_functions: std.AutoHashMapUnmanaged(ImportKey, u32) = .{},
+imported_functions: std.HashMapUnmanaged(
+    ImportKey,
+    u32,
+    ImportKey.Ctx,
+    std.hash_map.default_max_load_percentage,
+) = .{},
 
 const ImportKey = struct {
     module_name: []const u8,
     name: []const u8,
+
+    const Ctx = struct {
+        pub fn hash(ctx: Ctx, key: ImportKey) u64 {
+            _ = ctx;
+            const hashFunc = std.hash.autoHash;
+            var hasher = std.hash.Wyhash.init(0);
+            hashFunc(&hasher, key.module_name.len);
+            hashFunc(&hasher, key.module_name.ptr);
+            hashFunc(&hasher, key.name.len);
+            hashFunc(&hasher, key.name.ptr);
+            return hasher.final();
+        }
+
+        pub fn eql(ctx: Ctx, lhs: ImportKey, rhs: ImportKey) bool {
+            _ = ctx;
+            return std.mem.eql(u8, lhs.name, rhs.name) and
+                std.mem.eql(u8, lhs.module_name, rhs.module_name);
+        }
+    };
 };
 
 pub const SymbolWithLoc = struct {

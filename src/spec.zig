@@ -428,6 +428,18 @@ pub const Symbol = struct {
         };
     }
 
+    /// Sets the index of a symbol.
+    pub fn setIndex(self: *Symbol, idx: u32) void {
+        return switch (self.kind) {
+            .function => |*func| func.index = idx,
+            .data => |*data| data.index = idx,
+            .global => |*global| global.index = idx,
+            .section => |*section| section.* = idx,
+            .event => |*event| event.index = idx,
+            .table => |*table| table.index = idx,
+        };
+    }
+
     pub const Data = struct {
         index: ?u32 = null,
         offset: ?u32 = null,
