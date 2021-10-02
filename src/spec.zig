@@ -396,6 +396,8 @@ pub const Symbol = struct {
     /// as well as the data it holds.
     kind: Kind,
 
+    /// A union of possible symbol types, providing
+    /// access to type-dependent information.
     pub const Kind = union(enum) {
         function: Function,
         data: Data,
@@ -440,6 +442,17 @@ pub const Symbol = struct {
         };
     }
 
+    /// Verifies if the given symbol should be imported from the
+    /// host environment or not
+    pub fn requiresImport(self: Symbol) bool {
+        if (self.kind == .data) return false;
+        if (!self.isUndefined() and self.isWeak()) return true;
+        if (!self.isUndefined()) return false;
+        if (self.isWeak()) return false;
+
+        return true;
+    }
+
     pub const Data = struct {
         index: ?u32 = null,
         offset: ?u32 = null,
@@ -452,10 +465,6 @@ pub const Symbol = struct {
 
     pub const Function = struct {
         index: u32,
-        /// will be equal to `index` in the case of a defined function,
-        /// else it will be set based on an import later on.
-        /// Reading before it is set is illegal.
-        function_index: u32 = undefined,
     };
 
     pub const Event = struct {

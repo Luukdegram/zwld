@@ -28,7 +28,7 @@ atoms: std.AutoArrayHashMapUnmanaged(u16, *Atom) = .{},
 /// specified symbols to their index into this table.
 symtab: std.ArrayListUnmanaged(spec.Symbol) = .{},
 
-// SECTIONS //
+// OUTPUT SECTIONS //
 /// Output function signature types
 types: std.ArrayListUnmanaged(spec.sections.Type) = .{},
 /// Output import section
@@ -48,15 +48,22 @@ elements: std.ArrayListUnmanaged(spec.sections.Element) = .{},
 /// Output code section
 code: std.ArrayListUnmanaged([]u8) = .{},
 
+// IMPORTS //
 /// Table where the key is represented by an import.
-/// Each entry represents a function, and maps to the index within the list
-/// of imports.
-imported_functions: std.HashMapUnmanaged(
-    ImportKey,
-    u32,
-    ImportKey.Ctx,
-    std.hash_map.default_max_load_percentage,
-) = .{},
+/// Each entry represents an imported function, and maps to the index within this map
+imported_functions: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
+/// Table where the key is represented by an import.
+/// Each entry represents an imported global from the host environment and maps to the index
+/// within this map.
+imported_globals: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
+/// Table where the key is represented by an import.
+/// Each entry represents an imported table from the host environment and maps to the index
+/// within this map.
+imported_tables: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
+/// A list of symbols that are imported from a host environment.
+imported_symbols: std.ArrayListUnmanaged(spec.Symbol) = .{},
+
+const max_load = std.hash_map.default_max_load_percentage;
 
 const ImportKey = struct {
     module_name: []const u8,
@@ -114,6 +121,10 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.global_symbols.keys()) |name| {
         gpa.free(name);
     }
+    self.imported_functions.deinit(gpa);
+    self.imported_globals.deinit(gpa);
+    self.imported_tables.deinit(gpa);
+    self.imported_symbols.deinit(gpa);
     self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
     self.sections.deinit(gpa);
@@ -209,6 +220,12 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
     for (object.symtable) |symbol, i| {
         const sym_idx = @intCast(u32, i);
 
+        // Check if they should be imported, if so: add them to the import section.
+        if (symbol.requiresImport()) {
+            log.debug("Symbol '{s}' should be imported", .{symbol.name});
+            try self.appendImportSymbol(gpa, object_index, sym_idx);
+        }
+
         if (symbol.isWeak() or symbol.isGlobal()) {
             const name = try gpa.dupe(u8, symbol.name);
             const result = try self.global_symbols.getOrPut(gpa, name);
@@ -249,13 +266,6 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
                 .file = object_index,
             };
         }
-
-        // Check if they should be imported, if so: add them to the import section.
-        // if (symbol.import()) {
-        //     const import_index = @intCast(u32, self.imports.items.len);
-        //     symbol.index = import_index;
-        //     self.imports.append(gpa, .{});
-        // }
     }
 }
 
@@ -284,27 +294,53 @@ pub fn getMatchingSection(self: *Wasm, gpa: *Allocator, object_index: u16, secti
     return index;
 }
 
+/// Checks if a symbol is already imported or not. If not, will be appended as well as appended
+/// to a typed list of imports.
 fn appendImportSymbol(self: *Wasm, gpa: *Allocator, object_id: u16, symbol_id: u32) !void {
-    const object: *Object = self.objects.items[object_id];
+    const object: *Object = &self.objects.items[object_id];
     const symbol = &object.symtable[symbol_id];
-    const import = object.imports[symbol.index];
+    const import = object.imports[symbol.index().?]; // Programmer error: Undefined data symbols are not imported.
     const module_name = import.module_name;
     const import_name = import.name;
 
     switch (symbol.kind) {
         .function => |*func| {
-            const func_type = object.types[import.kind.function];
-            _ = func_type;
             const ret = try self.imported_functions.getOrPut(gpa, .{
                 .module_name = module_name,
                 .name = import_name,
             });
-            const import_index = if (ret.found_existing)
-                ret.value_ptr.*
-            else
-                @intCast(u32, self.imported_functions.count() - 1);
-            func.function_index = import_index;
+            if (!ret.found_existing) {
+                try self.imported_symbols.append(gpa, symbol.*);
+                ret.value_ptr.* = @intCast(u32, self.imported_functions.count() - 1);
+            }
+            func.index = ret.value_ptr.*;
+            log.debug("Imported function '{s}' at index ({d})", .{ import_name, func.index });
         },
+        .global => |*global| {
+            const ret = try self.imported_globals.getOrPut(gpa, .{
+                .module_name = module_name,
+                .name = import_name,
+            });
+            if (!ret.found_existing) {
+                try self.imported_symbols.append(gpa, symbol.*);
+                ret.value_ptr.* = @intCast(u32, self.imported_globals.count() - 1);
+            }
+            global.index = ret.value_ptr.*;
+            log.debug("Imported global '{s}' at index ({d})", .{ import_name, global.index });
+        },
+        .table => |*table| {
+            const ret = try self.imported_tables.getOrPut(gpa, .{
+                .module_name = module_name,
+                .name = import_name,
+            });
+            if (!ret.found_existing) {
+                try self.imported_symbols.append(gpa, symbol.*);
+                ret.value_ptr.* = @intCast(u32, self.imported_tables.count() - 1);
+            }
+            table.index = ret.value_ptr.*;
+            log.debug("Imported table '{s}' at index ({d})", .{ import_name, table.index });
+        },
+        else => unreachable, // programmer error: Given symbol cannot be imported
     }
 }
 

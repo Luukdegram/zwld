@@ -538,10 +538,7 @@ fn Parser(comptime ReaderType: type) type {
                     }
 
                     symbol.kind = switch (tag) {
-                        .function => .{ .function = .{
-                            .index = index,
-                            .function_index = if (!is_import) index else undefined,
-                        } },
+                        .function => .{ .function = .{ .index = index } },
                         .global => .{ .global = .{ .index = index } },
                         .event => .{ .event = .{ .index = index } },
                         .table => .{ .table = .{ .index = index } },
