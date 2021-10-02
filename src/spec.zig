@@ -118,7 +118,7 @@ pub const indexes = struct {
     pub const Func = enum(u32) { _ };
     pub const Table = enum(u32) { _ };
     pub const Mem = enum(u32) { _ };
-    pub const global = enum(u32) { _ };
+    pub const Global = enum(u32) { _ };
     pub const Elem = enum(u32) { _ };
     pub const Data = enum(u32) { _ };
     pub const Local = enum(u32) { _ };
@@ -182,6 +182,9 @@ pub const sections = struct {
         /// This should be the same type that can be found using the `type_idx`
         /// into the list of types
         func_type: *const sections.Type,
+
+        /// When the function is exported, this field will be set.
+        export_name: ?[]const u8 = null,
     };
 
     pub const Table = struct {
@@ -197,6 +200,9 @@ pub const sections = struct {
         valtype: ValueType,
         mutable: bool,
         init: InitExpression,
+
+        /// Index into the list of globals of the wasm module
+        global_idx: indexes.Global,
     };
 
     pub const Export = struct {
@@ -422,7 +428,7 @@ pub const Symbol = struct {
     pub fn unwrapAs(self: Symbol, comptime kind: Kind.Tag) ?std.meta.TagPayload(Kind, kind) {
         if (std.meta.activeTag(self.kind) != kind) return null;
 
-        return @field(self, @tagName(kind));
+        return @field(self.kind, @tagName(kind));
     }
 
     /// Returns the index the symbol points to.
@@ -473,6 +479,8 @@ pub const Symbol = struct {
 
     pub const Function = struct {
         index: u32,
+        /// Pointer to the function representing this symbol
+        func: ?*const sections.Func,
     };
 
     pub const Event = struct {

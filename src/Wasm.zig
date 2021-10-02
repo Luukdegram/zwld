@@ -63,6 +63,10 @@ imported_tables: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) =
 /// A list of symbols that are imported from a host environment.
 imported_symbols: std.ArrayListUnmanaged(SymbolWithLoc) = .{},
 
+// EXPORTS //
+/// A list of indexes to the symbol table that are exported
+exported_symbols: std.ArrayListUnmanaged(u32) = .{},
+
 const max_load = std.hash_map.default_max_load_percentage;
 
 const ImportKey = struct {
@@ -125,9 +129,15 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.imported_globals.deinit(gpa);
     self.imported_tables.deinit(gpa);
     self.imported_symbols.deinit(gpa);
+    self.exported_symbols.deinit(gpa);
     self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
     self.sections.deinit(gpa);
+    self.functions.deinit(gpa);
+    self.types.deinit(gpa);
+    self.globals.deinit(gpa);
+    self.exports.deinit(gpa);
+    self.tables.deinit(gpa);
     self.file.close();
     self.* = undefined;
 }
@@ -155,13 +165,9 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
         try self.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
 
-    // for (self.objects.items) |object| {
-    //     try self.buildSections(gpa, object);
-    // }
-
-    // for (self.objects.items) |*object, obj_idx| {
-    //     try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
-    // }
+    try self.reindex(gpa);
+    try self.setupTypes(gpa);
+    try self.setupExports(gpa);
 
     // try self.allocateAtoms();
     try self.writeMagicBytes();
@@ -177,11 +183,6 @@ fn populateSymbolTable(self: *Wasm, gpa: *Allocator) !void {
         }
     }
 }
-
-// fn buildRelocations(self: *Wasm, gpa: *Allocator, object_id: u16) !void {
-// const object: *Object = self.objects.items[object_id];
-// const types = object.types;
-// }
 
 fn sortSections(lhs: spec.Section, rhs: spec.Section) bool {
     if (rhs.section_kind == .custom) return false;
@@ -347,65 +348,118 @@ fn appendImportSymbol(self: *Wasm, gpa: *Allocator, object_id: u16, symbol_id: u
 
 /// Calculates the new indexes for symbols and their respective symbols
 fn reindex(self: *Wasm, gpa: *Allocator) !void {
+    log.debug("Merging functions", .{});
     for (self.objects.items) |object| {
         for (object.functions) |*func| {
-            func.func_idx = @intCast(u32, self.imported_functions.count() + self.functions.items.len);
+            func.func_idx = @intToEnum(
+                spec.indexes.Func,
+                @intCast(u32, self.imported_functions.count() + self.functions.items.len),
+            );
             try self.functions.append(gpa, func.*);
         }
     }
+    log.debug("Merged ({d}) functions", .{self.functions.items.len});
 
     // merge globals
     {
+        log.debug("Merging globals", .{});
         for (self.objects.items) |object| {
             for (object.globals) |*global| {
-                global.index = @intCast(u32, self.imported_globals.count() + self.globals.items.len);
+                global.global_idx = @intToEnum(
+                    spec.indexes.Global,
+                    @intCast(u32, self.imported_globals.count() + self.globals.items.len),
+                );
                 try self.globals.append(gpa, global.*);
             }
         }
 
-        var global_index = @intCast(u32, self.imported_globals.items.len);
+        var global_index = @intCast(u32, self.imported_globals.count());
         for (self.globals.items) |*global| {
-            global.index = global_index;
+            global.global_idx = @intToEnum(spec.indexes.Global, global_index);
             global_index += 1;
         }
+        log.debug("Merged ({d}) globals", .{self.globals.items.len});
     }
 
     // merge tables
     {
-        for (self.objects.items) |object| {
-            for (object.tables) |*table| {
-                table.index = @intCast(u32, self.imported_tables.count() + self.tables.items.len);
-                try self.tables.append(gpa, table.*);
-            }
-        }
+        log.debug("TODO: Merge tables", .{});
+        // for (self.objects.items) |object| {
+        //     for (object.tables) |*table| {
+        //         table.index = @intCast(u32, self.imported_tables.count() + self.tables.items.len);
+        //         try self.tables.append(gpa, table.*);
+        //     }
+        // }
 
-        var table_index: u32 = @intCast(u32, self.imported_tables.items.len);
-        for (self.tables.items) |*table| {
-            table.index = table_index;
-            table_index += 1;
-        }
+        // var table_index: u32 = @intCast(u32, self.imported_tables.count());
+        // for (self.tables.items) |*table| {
+        //     _ = table;
+        //     table.index = table_index;
+        //     table_index += 1;
+        // }
     }
 }
 
 fn setupTypes(self: *Wasm, gpa: *Allocator) !void {
+    log.debug("Merging types", .{});
     for (self.objects.items) |object| {
         for (object.types) |wasm_type| {
             // TODO: Check for valid types
             try self.types.append(gpa, wasm_type);
         }
     }
+    log.debug("Merged ({d}) types from object files", .{self.types.items.len});
 
+    log.debug("Building types from import symbols", .{});
     for (self.imported_symbols.items) |symbol_with_loc| {
         const object = self.objects.items[symbol_with_loc.file];
-        const symbol = object.symtab[symbol_with_loc.sym_index];
+        const symbol = object.symtable[symbol_with_loc.sym_index];
         if (symbol.kind == .function) {
-            try self.types.append(gpa, self.objects.types[symbol.index()]);
+            log.debug("Adding type from function '{s}'", .{symbol.name});
+            try self.types.append(gpa, object.types[symbol.index().?]);
         }
     }
 
+    log.debug("Building types from functions", .{});
     for (self.functions.items) |func| {
         try self.types.append(gpa, func.func_type.*);
     }
+    log.debug("Completed building types. Total count: ({d})", .{self.types.items.len});
+}
+
+fn setupExports(self: *Wasm, gpa: *Allocator) !void {
+    var global_index = @intCast(u32, self.imported_globals.count() + self.globals.items.len);
+    _ = global_index;
+
+    log.debug("Building exports from symbols", .{});
+    for (self.symtab.items) |symbol, symbol_index| {
+        if (!symbol.isExported()) continue;
+
+        var name: []const u8 = symbol.name;
+        var exported: spec.sections.Export = undefined;
+        if (symbol.unwrapAs(.function)) |func| {
+            // func cannot be `null` because only defined functions
+            // can be exported, which is verified with `isExported()`
+            if (func.func.?.export_name) |export_name| {
+                name = export_name;
+            }
+            exported = .{
+                .name = name,
+                .kind = .function,
+                .index = @enumToInt(func.func.?.func_idx),
+            };
+        } else {
+            log.debug("TODO: Export non-functions", .{});
+            continue;
+        }
+
+        log.debug("Appending export from symbol '{s}' using name: '{s}'", .{
+            symbol.name, name,
+        });
+        try self.exports.append(gpa, exported);
+        try self.exported_symbols.append(gpa, @intCast(u32, symbol_index));
+    }
+    log.debug("Completed building exports. Total count: ({d})", .{self.exports.items.len});
 }
 
 fn allocateAtoms(self: *Wasm) !void {

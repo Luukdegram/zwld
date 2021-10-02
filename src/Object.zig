@@ -32,13 +32,13 @@ types: []const spec.sections.Type = &.{},
 /// A list of all imports for this module
 imports: []const spec.sections.Import = &.{},
 /// Parsed function section
-functions: []const spec.sections.Func = &.{},
+functions: []spec.sections.Func = &.{},
 /// Parsed table section
 tables: []const spec.sections.Table = &.{},
 /// Parsed memory section
 memories: []const spec.sections.Memory = &.{},
 /// Parsed global section
-globals: []const spec.sections.Global = &.{},
+globals: []spec.sections.Global = &.{},
 /// Parsed export section
 exports: []const spec.sections.Export = &.{},
 /// Parsed element section
@@ -269,11 +269,12 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .global => {
-                        for (try readVec(&self.object.globals, reader, gpa)) |*global| {
+                        for (try readVec(&self.object.globals, reader, gpa)) |*global, index| {
                             global.* = .{
                                 .valtype = try readEnum(spec.ValueType, reader),
                                 .mutable = (try reader.readByte()) == 0x01,
                                 .init = try readInit(reader),
+                                .global_idx = @intToEnum(spec.indexes.Global, @intCast(u32, index)),
                             };
                         }
                         try assertEnd(reader);
@@ -288,6 +289,10 @@ fn Parser(comptime ReaderType: type) type {
                                 .kind = try readEnum(spec.ExternalType, reader),
                                 .index = try readLeb(u32, reader),
                             };
+
+                            if (exp.kind == .function) {
+                                self.object.functions[exp.index].export_name = name;
+                            }
                         }
                         try assertEnd(reader);
                     },
@@ -540,7 +545,10 @@ fn Parser(comptime ReaderType: type) type {
                     }
 
                     symbol.kind = switch (tag) {
-                        .function => .{ .function = .{ .index = index } },
+                        .function => .{ .function = .{
+                            .index = index,
+                            .func = if (is_import) null else &self.object.functions[index],
+                        } },
                         .global => .{ .global = .{ .index = index } },
                         .event => .{ .event = .{ .index = index } },
                         .table => .{ .table = .{ .index = index } },
@@ -725,4 +733,29 @@ fn loadSectionData(self: *Object, gpa: *Allocator, section: spec.Section) ![]con
     const read_len = try self.file.?.preadAll(data, section.offset);
     if (read_len != section.size) return error.InvalidSection;
     return data;
+}
+
+/// Performs relocations for the code, data and custom sections
+pub fn performRelocations(self: *Object, gpa: *Allocator) !void {
+    for (self.sections) |section, index| {
+        switch (section.section_kind) {
+            .code => try relocSection(gpa, @intCast(u16, index)),
+            else => {},
+        }
+    }
+}
+
+/// Performs the relocations for a given section index
+fn relocSection(self: *Object, gpa: *Allocator, section_index: u16) !void {
+    _ = gpa;
+    const section = self.sections[section_index];
+    const relocations: []const spec.Relocation = self.relocations.get(section_index) orelse return;
+    log.debug("Performing relocations for section '{s}'", .{@tagName(section.section_kind)});
+
+    for (relocations) |reloc| {
+        if (reloc.relocation_type == .R_WASM_TYPE_INDEX_LEB) {
+            log.debug("TODO: Lifeness of types", .{});
+            continue;
+        }
+    }
 }
