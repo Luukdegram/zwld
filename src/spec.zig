@@ -173,7 +173,15 @@ pub const sections = struct {
     };
 
     pub const Func = struct {
+        /// Index into the list of types
         type_idx: indexes.Type,
+        /// Index into the list of functions
+        func_idx: indexes.Func,
+
+        /// Pointer to a `Type`
+        /// This should be the same type that can be found using the `type_idx`
+        /// into the list of types
+        func_type: *const sections.Type,
     };
 
     pub const Table = struct {

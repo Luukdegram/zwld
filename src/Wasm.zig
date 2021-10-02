@@ -61,7 +61,7 @@ imported_globals: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) 
 /// within this map.
 imported_tables: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
 /// A list of symbols that are imported from a host environment.
-imported_symbols: std.ArrayListUnmanaged(spec.Symbol) = .{},
+imported_symbols: std.ArrayListUnmanaged(SymbolWithLoc) = .{},
 
 const max_load = std.hash_map.default_max_load_percentage;
 
@@ -302,6 +302,7 @@ fn appendImportSymbol(self: *Wasm, gpa: *Allocator, object_id: u16, symbol_id: u
     const import = object.imports[symbol.index().?]; // Programmer error: Undefined data symbols are not imported.
     const module_name = import.module_name;
     const import_name = import.name;
+    const symbol_with_loc: SymbolWithLoc = .{ .file = object_id, .sym_index = symbol_id };
 
     switch (symbol.kind) {
         .function => |*func| {
@@ -310,7 +311,7 @@ fn appendImportSymbol(self: *Wasm, gpa: *Allocator, object_id: u16, symbol_id: u
                 .name = import_name,
             });
             if (!ret.found_existing) {
-                try self.imported_symbols.append(gpa, symbol.*);
+                try self.imported_symbols.append(gpa, symbol_with_loc);
                 ret.value_ptr.* = @intCast(u32, self.imported_functions.count() - 1);
             }
             func.index = ret.value_ptr.*;
@@ -322,7 +323,7 @@ fn appendImportSymbol(self: *Wasm, gpa: *Allocator, object_id: u16, symbol_id: u
                 .name = import_name,
             });
             if (!ret.found_existing) {
-                try self.imported_symbols.append(gpa, symbol.*);
+                try self.imported_symbols.append(gpa, symbol_with_loc);
                 ret.value_ptr.* = @intCast(u32, self.imported_globals.count() - 1);
             }
             global.index = ret.value_ptr.*;
@@ -334,13 +335,76 @@ fn appendImportSymbol(self: *Wasm, gpa: *Allocator, object_id: u16, symbol_id: u
                 .name = import_name,
             });
             if (!ret.found_existing) {
-                try self.imported_symbols.append(gpa, symbol.*);
+                try self.imported_symbols.append(gpa, symbol_with_loc);
                 ret.value_ptr.* = @intCast(u32, self.imported_tables.count() - 1);
             }
             table.index = ret.value_ptr.*;
             log.debug("Imported table '{s}' at index ({d})", .{ import_name, table.index });
         },
         else => unreachable, // programmer error: Given symbol cannot be imported
+    }
+}
+
+/// Calculates the new indexes for symbols and their respective symbols
+fn reindex(self: *Wasm, gpa: *Allocator) !void {
+    for (self.objects.items) |object| {
+        for (object.functions) |*func| {
+            func.func_idx = @intCast(u32, self.imported_functions.count() + self.functions.items.len);
+            try self.functions.append(gpa, func.*);
+        }
+    }
+
+    // merge globals
+    {
+        for (self.objects.items) |object| {
+            for (object.globals) |*global| {
+                global.index = @intCast(u32, self.imported_globals.count() + self.globals.items.len);
+                try self.globals.append(gpa, global.*);
+            }
+        }
+
+        var global_index = @intCast(u32, self.imported_globals.items.len);
+        for (self.globals.items) |*global| {
+            global.index = global_index;
+            global_index += 1;
+        }
+    }
+
+    // merge tables
+    {
+        for (self.objects.items) |object| {
+            for (object.tables) |*table| {
+                table.index = @intCast(u32, self.imported_tables.count() + self.tables.items.len);
+                try self.tables.append(gpa, table.*);
+            }
+        }
+
+        var table_index: u32 = @intCast(u32, self.imported_tables.items.len);
+        for (self.tables.items) |*table| {
+            table.index = table_index;
+            table_index += 1;
+        }
+    }
+}
+
+fn setupTypes(self: *Wasm, gpa: *Allocator) !void {
+    for (self.objects.items) |object| {
+        for (object.types) |wasm_type| {
+            // TODO: Check for valid types
+            try self.types.append(gpa, wasm_type);
+        }
+    }
+
+    for (self.imported_symbols.items) |symbol_with_loc| {
+        const object = self.objects.items[symbol_with_loc.file];
+        const symbol = object.symtab[symbol_with_loc.sym_index];
+        if (symbol.kind == .function) {
+            try self.types.append(gpa, self.objects.types[symbol.index()]);
+        }
+    }
+
+    for (self.functions.items) |func| {
+        try self.types.append(gpa, func.func_type.*);
     }
 }
 

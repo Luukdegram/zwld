@@ -246,8 +246,10 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .function => {
-                        for (try readVec(&self.object.functions, reader, gpa)) |*func| {
+                        for (try readVec(&self.object.functions, reader, gpa)) |*func, index| {
                             func.type_idx = try readEnum(spec.indexes.Type, reader);
+                            func.func_idx = @intToEnum(spec.indexes.Func, @intCast(u32, index));
+                            func.func_type = &self.object.types[@enumToInt(func.type_idx)];
                         }
                         try assertEnd(reader);
                     },
