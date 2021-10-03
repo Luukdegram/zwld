@@ -64,8 +64,8 @@ imported_tables: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) =
 imported_symbols: std.ArrayListUnmanaged(SymbolWithLoc) = .{},
 
 // EXPORTS //
-/// A list of indexes to the symbol table that are exported
-exported_symbols: std.ArrayListUnmanaged(u32) = .{},
+/// A list of symbols which are to be exported
+exported_symbols: std.ArrayListUnmanaged(*spec.Symbol) = .{},
 
 const max_load = std.hash_map.default_max_load_percentage;
 
@@ -172,16 +172,6 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     // try self.allocateAtoms();
     try self.writeMagicBytes();
     try self.writeAtoms(gpa);
-}
-
-fn populateSymbolTable(self: *Wasm, gpa: *Allocator) !void {
-    for (self.objects.items) |object| {
-        for (object.symtable) |symbol| {
-            const index = @intCast(u32, self.symtab.items.len);
-            symbol.output_index = index;
-            self.symtab.append(gpa, symbol);
-        }
-    }
 }
 
 fn sortSections(lhs: spec.Section, rhs: spec.Section) bool {
@@ -432,7 +422,9 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
     _ = global_index;
 
     log.debug("Building exports from symbols", .{});
-    for (self.symtab.items) |symbol, symbol_index| {
+    var symbol_it = SymbolIterator.init(self);
+    while (symbol_it.next()) |entry| {
+        const symbol = entry.symbol;
         if (!symbol.isExported()) continue;
 
         var name: []const u8 = symbol.name;
@@ -457,7 +449,7 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
             symbol.name, name,
         });
         try self.exports.append(gpa, exported);
-        try self.exported_symbols.append(gpa, @intCast(u32, symbol_index));
+        try self.exported_symbols.append(gpa, entry.symbol);
     }
     log.debug("Completed building exports. Total count: ({d})", .{self.exports.items.len});
 }
@@ -543,3 +535,36 @@ fn writeAtoms(self: *Wasm, gpa: *Allocator) !void {
         try writer.writeAll(code.items);
     }
 }
+
+const SymbolIterator = struct {
+    symbol_index: u32,
+    file_index: u16,
+    wasm: *Wasm,
+
+    const Entry = struct {
+        sym_index: u32,
+        file_index: u16,
+        symbol: *spec.Symbol,
+    };
+
+    fn init(wasm: *Wasm) SymbolIterator {
+        return .{ .symbol_index = 0, .file_index = 0, .wasm = wasm };
+    }
+
+    fn next(self: *SymbolIterator) ?Entry {
+        if (self.file_index >= self.wasm.objects.items.len) return null;
+        const object: *Object = &self.wasm.objects.items[self.file_index];
+        if (self.symbol_index >= object.symtable.len) {
+            self.file_index += 1;
+            return self.next();
+        }
+
+        const symbol = &object.symtable[self.symbol_index];
+        defer self.symbol_index += 1;
+        return Entry{
+            .sym_index = self.symbol_index,
+            .file_index = self.file_index,
+            .symbol = symbol,
+        };
+    }
+};
