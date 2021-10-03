@@ -169,38 +169,8 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.setupTypes(gpa);
     try self.setupExports(gpa);
 
-    // try self.allocateAtoms();
     try self.writeMagicBytes();
     try self.writeAtoms(gpa);
-}
-
-fn sortSections(lhs: spec.Section, rhs: spec.Section) bool {
-    if (rhs.section_kind == .custom) return false;
-    const lhs_idx = @enumToInt(lhs.section_kind);
-    const rhs_idx = @enumToInt(rhs.section_kind);
-
-    if (rhs.section_kind == .data_count and lhs_idx >= @enumToInt(spec.SectionType.code)) {
-        return true;
-    }
-    return rhs_idx < lhs_idx;
-}
-
-/// Finds all used sections from each object file, and then 
-fn buildSections(self: *Wasm, gpa: *Allocator, object_id: u16) !void {
-    const object: Object = self.objects.items[object_id];
-    for (object.sections) |obj_section, section_id| {
-        switch (obj_section.section_kind) {
-            .custom,
-            .data_count,
-            .data,
-            => continue,
-            else => {},
-        }
-        const index = (try getMatchingSection(gpa, object_id, section_id)) orelse continue;
-        const section: *spec.Section = &self.sections.items[index];
-        section.size += obj_section.size;
-        section.count += obj_section.count;
-    }
 }
 
 fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void {
