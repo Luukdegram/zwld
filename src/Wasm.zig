@@ -381,7 +381,8 @@ fn setupTypes(self: *Wasm, gpa: *Allocator) !void {
     }
 
     log.debug("Building types from functions", .{});
-    for (self.functions.items) |func| {
+    for (self.functions.items) |*func| {
+        func.type_idx = @intToEnum(spec.indexes.Type, @intCast(u32, self.types.items.len));
         try self.types.append(gpa, func.func_type.*);
     }
     log.debug("Completed building types. Total count: ({d})", .{self.types.items.len});
