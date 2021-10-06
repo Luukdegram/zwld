@@ -160,10 +160,7 @@ pub const sections = struct {
 
         pub const Kind = union(ExternalType) {
             function: indexes.Type,
-            table: struct {
-                reftype: RefType,
-                limits: Limits,
-            },
+            table: sections.Table,
             memory: Limits,
             global: struct {
                 valtype: ValueType,
