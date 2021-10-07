@@ -44,7 +44,7 @@ exports: []const spec.sections.Export = &.{},
 /// Parsed element section
 elements: []const spec.sections.Element = &.{},
 /// Parsed code section
-code: []const []u8 = &.{},
+code: []spec.sections.Code = &.{},
 /// Parsed data section
 data: []const spec.sections.Data = &.{},
 /// Represents the function ID that must be called on startup.
@@ -312,10 +312,13 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .code => {
-                        for (try readVec(&self.object.code, reader, gpa)) |*code| {
+                        for (try readVec(&self.object.code, reader, gpa)) |*code, index| {
                             const code_len = try readLeb(u32, reader);
-                            code.* = try gpa.alloc(u8, code_len);
-                            try reader.readNoEof(code.*);
+                            code.* = .{
+                                .data = try gpa.alloc(u8, code_len),
+                                .func = &self.object.functions[index],
+                            };
+                            try reader.readNoEof(code.data);
                         }
                     },
                     else => try self.reader.reader().skipBytes(len, .{}),
@@ -620,142 +623,4 @@ fn assertEnd(reader: anytype) !void {
     const len = try reader.read(&buf);
     if (len != 0) return error.MalformedSection;
     if (reader.context.bytes_left != 0) return error.MalformedSection;
-}
-
-/// Parses a single object file into a linked list of atoms
-pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm: *Wasm) !void {
-    var symbols_by_section = std.AutoArrayHashMap(spec.SectionType, std.ArrayList(u32)).init(gpa);
-    defer for (symbols_by_section.values()) |syms| {
-        syms.deinit();
-    } else symbols_by_section.deinit();
-
-    for (self.sections) |section| {
-        if (section.section_kind == .custom) continue;
-        try symbols_by_section.putNoClobber(section.section_kind, std.ArrayList(u32).init(gpa));
-    }
-
-    for (self.symtable) |sym, sym_index| {
-        const sect_ty: spec.SectionType = switch (sym.kind) {
-            .SYMTAB_FUNCTION => .function,
-            .SYMTAB_DATA => .data,
-            .SYMTAB_GLOBAL => .global,
-            .SYMTAB_SECTION => continue,
-            .SYMTAB_EVENT => continue, // TODO implement event section
-            .SYMTAB_TABLE => .table,
-        };
-        const map = symbols_by_section.getPtr(sect_ty) orelse continue;
-        try map.append(@intCast(u32, sym_index));
-    }
-
-    for (self.sections) |section, idx| {
-        log.debug("Parsing section '{s}'", .{@tagName(section.section_kind)});
-
-        const wasm_section_index = (try wasm.getMatchingSection(gpa, object_index, @intCast(u16, idx))) orelse continue;
-
-        const atom = try Atom.createEmpty(gpa);
-        errdefer atom.deinit(gpa);
-
-        try wasm.managed_atoms.append(gpa, atom);
-
-        atom.file = object_index;
-        atom.size = @intCast(u32, section.size);
-
-        const symbol_ids = symbols_by_section.get(section.section_kind).?;
-        if (symbol_ids.items.len == 0) {
-            log.debug("TODO, handle section with no symbols: {s}", .{@tagName(section.section_kind)});
-            continue;
-        }
-
-        for (symbol_ids.items) |index| {
-            const sym = self.symtable[index];
-            if (sym.offset) |offset| {
-                try atom.contained.append(gpa, .{
-                    .local_sym_index = index,
-                    .offset = offset,
-                });
-            } else {
-                try atom.aliases.append(gpa, index);
-            }
-        }
-        sortBySeniority(atom.aliases.items, self);
-        if (atom.aliases.items.len > 0) {
-            atom.sym_index = atom.aliases.swapRemove(0); // take index of highest seniority
-        }
-
-        const code = try self.loadSectionData(gpa, section);
-        defer gpa.free(code);
-        try atom.code.appendSlice(gpa, code);
-
-        if (self.relocations.get(@intCast(u32, idx))) |relocations| {
-            try atom.relocs.appendSlice(gpa, relocations);
-        }
-
-        const wasm_section: *spec.Section = &wasm.sections.items[wasm_section_index];
-        wasm_section.size += atom.size;
-
-        if (wasm.atoms.getPtr(wasm_section_index)) |last| {
-            last.*.next = atom;
-            atom.prev = last.*;
-            last.* = atom;
-        } else {
-            try wasm.atoms.putNoClobber(gpa, wasm_section_index, atom);
-        }
-    }
-}
-
-/// Sorts a slice of aliases based on the binding of a symbol
-fn sortBySeniority(aliases: []u32, object: *Object) void {
-    const Sort = struct {
-        fn lessThan(obj: *Object, lhs: u32, rhs: u32) bool {
-            const lhs_sym = obj.symtable[lhs];
-            const rhs_sym = obj.symtable[rhs];
-
-            if (lhs_sym.eqlBinding(rhs_sym)) {
-                return false;
-            } else if (lhs_sym.isGlobal()) {
-                return true;
-            } else if (lhs_sym.isWeak() and rhs_sym.isLocal()) {
-                return true;
-            } else {
-                return false;
-            }
-        }
-    };
-
-    std.sort.sort(u32, aliases, object, Sort.lessThan);
-}
-
-/// Loads the section contents into a buffer.
-/// Memory is owned by the caller.
-fn loadSectionData(self: *Object, gpa: *Allocator, section: spec.Section) ![]const u8 {
-    const data = try gpa.alloc(u8, section.size);
-    errdefer gpa.free(data);
-    const read_len = try self.file.?.preadAll(data, section.offset);
-    if (read_len != section.size) return error.InvalidSection;
-    return data;
-}
-
-/// Performs relocations for the code, data and custom sections
-pub fn performRelocations(self: *Object, gpa: *Allocator) !void {
-    for (self.sections) |section, index| {
-        switch (section.section_kind) {
-            .code => try relocSection(gpa, @intCast(u16, index)),
-            else => {},
-        }
-    }
-}
-
-/// Performs the relocations for a given section index
-fn relocSection(self: *Object, gpa: *Allocator, section_index: u16) !void {
-    _ = gpa;
-    const section = self.sections[section_index];
-    const relocations: []const spec.Relocation = self.relocations.get(section_index) orelse return;
-    log.debug("Performing relocations for section '{s}'", .{@tagName(section.section_kind)});
-
-    for (relocations) |reloc| {
-        if (reloc.relocation_type == .R_WASM_TYPE_INDEX_LEB) {
-            log.debug("TODO: Lifeness of types", .{});
-            continue;
-        }
-    }
 }

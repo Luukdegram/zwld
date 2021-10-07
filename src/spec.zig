@@ -239,12 +239,7 @@ pub const sections = struct {
 
     pub const Code = struct {
         data: []u8,
-        // pub const Local = struct {
-        //     valtype: ValueType,
-        //     count: u32,
-        // };
-        // locals: []const Local,
-        // body: []const Instruction,
+        func: *const Func,
     };
 
     pub const Data = struct {

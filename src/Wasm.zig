@@ -16,17 +16,8 @@ const log = std.log.scoped(.zwld);
 file: fs.File,
 /// A list with references to objects we link to during `flush()`
 objects: std.ArrayListUnmanaged(Object) = .{},
-/// A list of references to atoms
-managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// A map of global names to their symbol location in an object file
 global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
-/// List of sections to be emitted to the binary file
-sections: std.ArrayListUnmanaged(spec.Section) = .{},
-/// A table that maps from a section to an Atom linked list
-atoms: std.AutoArrayHashMapUnmanaged(u16, *Atom) = .{},
-/// A list of all symbols, which is used to map from object file
-/// specified symbols to their index into this table.
-symtab: std.ArrayListUnmanaged(spec.Symbol) = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
@@ -113,11 +104,6 @@ pub fn openPath(path: []const u8) !Wasm {
 /// Releases any resources that is owned by `Wasm`,
 /// usage after calling deinit is illegal behaviour.
 pub fn deinit(self: *Wasm, gpa: *Allocator) void {
-    self.atoms.deinit(gpa);
-    for (self.managed_atoms.items) |atom| {
-        atom.deinit(gpa);
-    }
-    self.managed_atoms.deinit(gpa);
     for (self.objects.items) |*object| {
         object.file.?.close();
         object.deinit(gpa);
@@ -132,7 +118,6 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.exported_symbols.deinit(gpa);
     self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
-    self.sections.deinit(gpa);
     self.functions.deinit(gpa);
     self.types.deinit(gpa);
     self.globals.deinit(gpa);
@@ -227,31 +212,6 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
             };
         }
     }
-}
-
-/// Returns the index of a section based on a given object index
-/// and section index. When the section does not yet exist in the wasm binary file, it will create
-/// one and return its index.
-pub fn getMatchingSection(self: *Wasm, gpa: *Allocator, object_index: u16, section_index: u16) !?u16 {
-    const object: Object = self.objects.items[object_index];
-    const section = object.sections[section_index];
-
-    if (section.section_kind == .custom) {
-        log.debug("TODO: Custom sections", .{});
-        return null;
-    }
-
-    const index = spec.Section.getIndex(self.sections.items, section.section_kind) orelse blk: {
-        const new_index = @intCast(u16, self.sections.items.len);
-        try self.sections.append(gpa, .{
-            .offset = 0,
-            .size = 0,
-            .section_kind = section.section_kind,
-        });
-        break :blk new_index;
-    };
-
-    return index;
 }
 
 /// Checks if a symbol is already imported or not. If not, will be appended as well as appended
@@ -442,88 +402,6 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
         try self.exported_symbols.append(gpa, entry.symbol);
     }
     log.debug("Completed building exports. Total count: ({d})", .{self.exports.items.len});
-}
-
-fn allocateAtoms(self: *Wasm) !void {
-    // iterate over all sections and the atoms that belong to that section
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const section_id: u16 = entry.key_ptr.*;
-        const section = self.sections.items[section_id];
-        var atom: *Atom = entry.value_ptr.*.getFirst();
-
-        log.debug("Allocating atoms in '{s}' section", .{@tagName(section.section_kind)});
-
-        var offset = @intCast(u32, section.offset);
-        while (true) {
-            const object: *Object = &self.objects.items[atom.file];
-            const sym = &object.symtable[atom.sym_index];
-            sym.offset = offset;
-
-            for (atom.aliases.items) |index| {
-                const alias_sym = &object.symtable[index];
-                alias_sym.offset = offset;
-            }
-
-            for (atom.contained.items) |sym_at_offset| {
-                const contained_sym = &object.symtable[sym_at_offset.local_sym_index];
-                if (contained_sym.offset) |*sym_offset| {
-                    sym_offset.* += offset;
-                } else contained_sym.offset = offset;
-            }
-
-            offset += atom.size;
-
-            if (atom.next) |next| {
-                atom = next;
-            } else break;
-        }
-    }
-}
-
-fn writeMagicBytes(self: *Wasm) !void {
-    try self.file.writeAll(&std.wasm.magic);
-    try self.file.writer().writeIntLittle(u32, 1);
-}
-
-fn writeAtoms(self: *Wasm, gpa: *Allocator) !void {
-    const writer = self.file.writer();
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const section_id = entry.key_ptr.*;
-        const section = self.sections.items[section_id];
-        log.debug("Writing section: {d}({s})", .{
-            section_id,
-            @tagName(section.section_kind),
-        });
-        var atom: *Atom = entry.value_ptr.*.getFirst();
-
-        // calculate the amount of items in the section
-        var count: u32 = 0;
-        var code = std.ArrayList(u8).init(gpa);
-        defer code.deinit();
-
-        while (true) {
-            // const object = self.objects.items[atom.file];
-            // const sym = object.symtable.items[atom.sym_index];
-
-            var fbs = std.io.fixedBufferStream(atom.code.items);
-            const reader = fbs.reader();
-
-            try atom.resolveRelocs(self);
-            count += try leb.readULEB128(u32, reader);
-            try code.appendSlice(atom.code.items[fbs.pos..]);
-
-            if (atom.next) |next| {
-                atom = next;
-            } else break;
-        }
-
-        try writer.writeByte(@enumToInt(section.section_kind));
-        try leb.writeULEB128(writer, code.items.len + 1);
-        try leb.writeULEB128(writer, count);
-        try writer.writeAll(code.items);
-    }
 }
 
 const SymbolIterator = struct {
