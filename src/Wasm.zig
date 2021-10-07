@@ -123,6 +123,7 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.globals.deinit(gpa);
     self.exports.deinit(gpa);
     self.tables.deinit(gpa);
+    self.code.deinit(gpa);
     self.file.close();
     self.* = undefined;
 }
@@ -153,6 +154,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.reindex(gpa);
     try self.setupTypes(gpa);
     try self.setupExports(gpa);
+    try self.relocateCode(gpa);
 
     try @import("emit_wasm.zig").emit(self);
 }
@@ -436,3 +438,31 @@ const SymbolIterator = struct {
         };
     }
 };
+
+fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
+    log.debug("Merging code sections and performing relocations", .{});
+    // Each function must have its own body
+    try self.code.ensureTotalCapacity(gpa, self.functions.items.len);
+    for (self.objects.items) |object| {
+        var offset: u32 = object.code.offset;
+        _ = offset;
+        for (object.code.bodies) |code, body_index| {
+            _ = code;
+            // check if we must perform relocations
+            if (object.relocations.get(@intCast(u32, body_index))) |relocations| {
+                const rel: []const spec.Relocation = relocations;
+                log.debug("Found relocations for section", .{});
+                for (rel) |_rel| switch (_rel.relocation_type) {
+                    .R_WASM_FUNCTION_INDEX_LEB,
+                    .R_WASM_TABLE_INDEX_SLEB,
+                    => {
+                        log.debug("Found relocation for symbol '{s}'", .{
+                            object.symtable[_rel.index].name,
+                        });
+                    },
+                    else => |ty| log.debug("TODO: Relocation for type {s}", .{@tagName(ty)}),
+                };
+            }
+        }
+    }
+}

@@ -44,7 +44,10 @@ exports: []const spec.sections.Export = &.{},
 /// Parsed element section
 elements: []const spec.sections.Element = &.{},
 /// Parsed code section
-code: []spec.sections.Code = &.{},
+code: struct {
+    offset: u32,
+    bodies: []spec.sections.Code,
+} = .{ .offset = undefined, .bodies = &.{} },
 /// Parsed data section
 data: []const spec.sections.Data = &.{},
 /// Represents the function ID that must be called on startup.
@@ -312,7 +315,11 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .code => {
-                        for (try readVec(&self.object.code, reader, gpa)) |*code, index| {
+                        const current = reader.context.bytes_left;
+                        const count = try readLeb(u32, reader);
+                        self.object.code.offset = @intCast(u32, current - reader.context.bytes_left);
+                        self.object.code.bodies = try gpa.alloc(spec.sections.Code, count);
+                        for (self.object.code.bodies) |*code, index| {
                             const code_len = try readLeb(u32, reader);
                             code.* = .{
                                 .data = try gpa.alloc(u8, code_len),
