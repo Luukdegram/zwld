@@ -359,12 +359,26 @@ fn reindex(self: *Wasm, gpa: *Allocator) !void {
     }
 }
 
+/// Checks if any type (read: function signature) already exists within
+/// the type section. When it does exist, it will return its index.
+/// Otherwise, returns `null`.
+fn findType(self: *Wasm, wasm_type: spec.sections.Type) ?usize {
+    return for (self.types.items) |ty, index| {
+        if (std.mem.eql(spec.ValueType, ty.params, wasm_type.params) and
+            std.mem.eql(spec.ValueType, ty.returns, wasm_type.returns))
+        {
+            return index;
+        }
+    } else null;
+}
+
 fn setupTypes(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merging types", .{});
     for (self.objects.items) |object| {
         for (object.types) |wasm_type| {
-            // TODO: Check for valid types
-            try self.types.append(gpa, wasm_type);
+            if (self.findType(wasm_type) == null) {
+                try self.types.append(gpa, wasm_type);
+            }
         }
     }
     log.debug("Merged ({d}) types from object files", .{self.types.items.len});
@@ -375,14 +389,20 @@ fn setupTypes(self: *Wasm, gpa: *Allocator) !void {
         const symbol = object.symtable[symbol_with_loc.sym_index];
         if (symbol.kind == .function) {
             log.debug("Adding type from function '{s}'", .{symbol.name});
-            try self.types.append(gpa, object.types[symbol.index().?]);
+            if (self.findType(object.types[symbol.index().?]) == null) {
+                try self.types.append(gpa, object.types[symbol.index().?]);
+            }
         }
     }
 
     log.debug("Building types from functions", .{});
     for (self.functions.items) |*func| {
-        func.type_idx = @intToEnum(spec.indexes.Type, @intCast(u32, self.types.items.len));
-        try self.types.append(gpa, func.func_type.*);
+        if (self.findType(func.func_type.*)) |index| {
+            func.type_idx = @intToEnum(spec.indexes.Type, @intCast(u32, index));
+        } else {
+            func.type_idx = @intToEnum(spec.indexes.Type, @intCast(u32, self.types.items.len));
+            try self.types.append(gpa, func.func_type.*);
+        }
     }
     log.debug("Completed building types. Total count: ({d})", .{self.types.items.len});
 }

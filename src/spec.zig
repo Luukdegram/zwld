@@ -151,6 +151,29 @@ pub const sections = struct {
     pub const Type = struct {
         params: []const ValueType,
         returns: []const ValueType,
+
+        pub fn format(self: Type, comptime fmt: []const u8, opt: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = fmt;
+            _ = opt;
+            try writer.writeByte('(');
+            for (self.params) |param, i| {
+                try writer.print("{s}", .{@tagName(param)});
+                if (i + 1 != self.params.len) {
+                    try writer.writeAll(", ");
+                }
+            }
+            try writer.writeAll(") -> ");
+            if (self.returns.len == 0) {
+                try writer.writeAll("nil");
+            } else {
+                for (self.returns) |return_ty, i| {
+                    try writer.print("{s}", .{@tagName(return_ty)});
+                    if (i + 1 != self.returns.len) {
+                        try writer.writeAll(", ");
+                    }
+                }
+            }
+        }
     };
 
     pub const Import = struct {

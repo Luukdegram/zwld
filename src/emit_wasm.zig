@@ -104,7 +104,7 @@ fn reserveSectionHeader(file: fs.File) !u64 {
     // section id, section byte size, section entry count
     const header_size = 1 + 5 + 5;
     try file.seekBy(header_size);
-    return (try file.getPos()) - header_size;
+    return (try file.getPos());
 }
 
 /// Emits the actual section header at the given `offset`.
@@ -121,13 +121,20 @@ fn emitSectionHeader(
     buf[0] = @enumToInt(section_type);
 
     const pos = try file.getPos();
-    const byte_size = pos - (offset + buf.len);
+    const byte_size = pos + 5 - offset; // +5 due to 'entries' also being part of byte size
     leb.writeUnsignedFixed(5, buf[1..6], @intCast(u32, byte_size));
     leb.writeUnsignedFixed(5, buf[6..], @intCast(u32, entries));
-    try file.pwriteAll(&buf, offset);
+    try file.pwriteAll(&buf, offset - buf.len);
+    log.debug("Written section '{s}' offset=0x{x:0>8} size={d} count={d}", .{
+        @tagName(section_type),
+        offset - buf.len,
+        byte_size,
+        entries,
+    });
 }
 
 fn emitType(type_entry: spec.sections.Type, writer: anytype) !void {
+    log.debug("Writing type {}", .{type_entry});
     try leb.writeULEB128(writer, @as(u8, 0x60)); //functype
     try leb.writeULEB128(writer, @intCast(u32, type_entry.params.len));
     for (type_entry.params) |para_ty| {
@@ -182,6 +189,7 @@ fn emitImport(import_entry: spec.sections.Import, writer: anytype) !void {
 }
 
 fn emitFunction(func: spec.sections.Func, writer: anytype) !void {
+    log.debug("Writing func with type index: {d}", .{func.type_idx});
     try leb.writeULEB128(writer, @enumToInt(func.type_idx));
 }
 
