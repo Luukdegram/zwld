@@ -442,29 +442,27 @@ const SymbolIterator = struct {
 fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merging code sections and performing relocations", .{});
     // Each function must have its own body
-    try self.code.ensureTotalCapacity(gpa, self.functions.items.len);
-    self.code.expandToCapacity();
+    try self.code.resize(gpa, self.functions.items.len);
     for (self.objects.items) |object| {
-        var offset: u32 = object.code.offset;
         for (object.code.bodies) |code, body_index| {
             const body_length = @intCast(u32, code.data.len);
             // check if we must perform relocations
             if (object.relocations.get(@intCast(u32, object.code.index))) |relocations| {
-                const rel: []const spec.Relocation = relocations;
+                const _rel: []const spec.Relocation = relocations;
                 log.debug("Found relocations for function body at index {d}", .{body_index});
-                for (rel) |_rel| {
-                    if (!isInbetween(offset, body_length, _rel.offset)) {
+                for (_rel) |rel| {
+                    if (!isInbetween(code.offset, body_length, rel.offset)) {
                         continue;
                     }
-                    const symbol: spec.Symbol = object.symtable[_rel.index];
-                    const body_offset = _rel.offset - offset;
-                    switch (_rel.relocation_type) {
+                    const symbol: spec.Symbol = object.symtable[rel.index];
+                    const body_offset = rel.offset - code.offset;
+                    switch (rel.relocation_type) {
                         .R_WASM_FUNCTION_INDEX_LEB,
                         .R_WASM_TABLE_INDEX_SLEB,
                         => {
                             log.debug("Performing relocation for function symbol '{s}' at offset=0x{x:0>8}", .{
                                 symbol.name,
-                                _rel.offset,
+                                rel.offset,
                             });
                         },
                         .R_WASM_GLOBAL_INDEX_LEB => {
@@ -474,7 +472,7 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                             } else @enumToInt(object.globals[symbol.index().?].global_idx);
                             log.debug("Performing relocation for global symbol '{s}' at offset=0x{x:0>8} body_offset=0x{x:0>8} index=({d})", .{
                                 symbol.name,
-                                _rel.offset,
+                                rel.offset,
                                 body_offset,
                                 index,
                             });
@@ -484,8 +482,6 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                     }
                 }
             }
-            offset += @intCast(u32, code.data.len);
-
             log.debug("Merging code body for {}", .{code.func.func_idx});
             self.code.items[@enumToInt(code.func.func_idx)] = code.data;
         }

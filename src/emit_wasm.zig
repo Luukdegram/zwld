@@ -89,7 +89,15 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .element, wasm.elements.items.len);
     }
-    log.debug("TODO: Code section", .{});
+    if (wasm.code.items.len != 0) {
+        log.debug("Writing 'Code' section ({d})", .{wasm.code.items.len});
+        const offset = try reserveSectionHeader(file);
+        for (wasm.code.items) |code| {
+            try leb.writeULEB128(writer, @intCast(u32, code.len));
+            try writer.writeAll(code);
+        }
+        try emitSectionHeader(file, offset, .code, wasm.code.items.len);
+    }
     log.debug("TODO: Data section", .{});
 }
 

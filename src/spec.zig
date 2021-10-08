@@ -238,7 +238,11 @@ pub const sections = struct {
     };
 
     pub const Code = struct {
+        /// Offset into the code section where the body starts
+        offset: u32,
+        /// Body of the function in bytes
         data: []u8,
+        /// Pointer to the function this body belongs to
         func: *const Func,
     };
 
