@@ -59,14 +59,14 @@ pub fn main() !void {
     };
     defer file.close();
 
-    var object = try Object.init(ally, file, path);
-    defer object.deinit(ally);
-
     if (args.option("-o") != null) {
         const output_path = args.option("-o").?;
         try linkFileAndWriteToPath(output_path, positionals);
         return;
     }
+
+    var object = try Object.init(ally, file, path);
+    defer object.deinit(ally);
 
     print("\n{s}:      file format wasm 0x{x:2>0}\n\n", .{ path, object.version });
 
