@@ -443,26 +443,57 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merging code sections and performing relocations", .{});
     // Each function must have its own body
     try self.code.ensureTotalCapacity(gpa, self.functions.items.len);
+    self.code.expandToCapacity();
     for (self.objects.items) |object| {
         var offset: u32 = object.code.offset;
-        _ = offset;
         for (object.code.bodies) |code, body_index| {
-            _ = code;
+            const body_length = @intCast(u32, code.data.len);
             // check if we must perform relocations
-            if (object.relocations.get(@intCast(u32, body_index))) |relocations| {
+            if (object.relocations.get(@intCast(u32, object.code.index))) |relocations| {
                 const rel: []const spec.Relocation = relocations;
-                log.debug("Found relocations for section", .{});
-                for (rel) |_rel| switch (_rel.relocation_type) {
-                    .R_WASM_FUNCTION_INDEX_LEB,
-                    .R_WASM_TABLE_INDEX_SLEB,
-                    => {
-                        log.debug("Found relocation for symbol '{s}'", .{
-                            object.symtable[_rel.index].name,
-                        });
-                    },
-                    else => |ty| log.debug("TODO: Relocation for type {s}", .{@tagName(ty)}),
-                };
+                log.debug("Found relocations for function body at index {d}", .{body_index});
+                for (rel) |_rel| {
+                    if (!isInbetween(offset, body_length, _rel.offset)) {
+                        continue;
+                    }
+                    const symbol: spec.Symbol = object.symtable[_rel.index];
+                    const body_offset = _rel.offset - offset;
+                    switch (_rel.relocation_type) {
+                        .R_WASM_FUNCTION_INDEX_LEB,
+                        .R_WASM_TABLE_INDEX_SLEB,
+                        => {
+                            log.debug("Performing relocation for function symbol '{s}' at offset=0x{x:0>8}", .{
+                                symbol.name,
+                                _rel.offset,
+                            });
+                        },
+                        .R_WASM_GLOBAL_INDEX_LEB => {
+                            const index: u32 = if (symbol.isUndefined()) blk: {
+                                const import = object.imports[symbol.index().?];
+                                break :blk self.imported_globals.get(.{ .module_name = import.module_name, .name = import.name }).?;
+                            } else @enumToInt(object.globals[symbol.index().?].global_idx);
+                            log.debug("Performing relocation for global symbol '{s}' at offset=0x{x:0>8} body_offset=0x{x:0>8} index=({d})", .{
+                                symbol.name,
+                                _rel.offset,
+                                body_offset,
+                                index,
+                            });
+                            leb.writeUnsignedFixed(5, code.data[body_offset..][0..5], index);
+                        },
+                        else => |ty| log.debug("TODO: Relocation for type {s}", .{@tagName(ty)}),
+                    }
+                }
             }
+            offset += @intCast(u32, code.data.len);
+
+            log.debug("Merging code body for {}", .{code.func.func_idx});
+            self.code.items[@enumToInt(code.func.func_idx)] = code.data;
         }
     }
+}
+
+/// Verifies if a given value is in between a minimum -and maximum value.
+/// The maxmimum value is calculated using the length, both start and end are inclusive.
+inline fn isInbetween(min: u32, length: u32, value: u32) bool {
+    return value >= min and value <= min + length;
 }

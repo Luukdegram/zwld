@@ -45,9 +45,15 @@ exports: []const spec.sections.Export = &.{},
 elements: []const spec.sections.Element = &.{},
 /// Parsed code section
 code: struct {
+    /// Offset from section size, meaning this
+    /// can be used to calculate the offset from the 'entries' count.
     offset: u32,
+    /// Index of the section in the module
+    index: u32,
+    /// Function bodies containing the bytes
+    /// and a pointer to the actual function.
     bodies: []spec.sections.Code,
-} = .{ .offset = undefined, .bodies = &.{} },
+} = .{ .offset = undefined, .bodies = &.{}, .index = undefined },
 /// Parsed data section
 data: []const spec.sections.Data = &.{},
 /// Represents the function ID that must be called on startup.
@@ -319,6 +325,7 @@ fn Parser(comptime ReaderType: type) type {
                         const count = try readLeb(u32, reader);
                         self.object.code.offset = @intCast(u32, current - reader.context.bytes_left);
                         self.object.code.bodies = try gpa.alloc(spec.sections.Code, count);
+                        self.object.code.index = @intCast(u32, self.sections.items.len - 1);
                         for (self.object.code.bodies) |*code, index| {
                             const code_len = try readLeb(u32, reader);
                             code.* = .{
