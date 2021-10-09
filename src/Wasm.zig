@@ -493,3 +493,77 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
 inline fn isInbetween(min: u32, length: u32, value: u32) bool {
     return value >= min and value <= min + length;
 }
+
+const Segment = struct {
+    name: []const u8,
+    alignment: u32,
+    offset: u32,
+    flags: u32,
+    size: u32,
+};
+
+fn relocateData(self: *Wasm, gpa: *Allocator) !void {
+    log.debug("Merging data sections and performing relocations", .{});
+
+    // map containing all segments, where the name of the segment is its key
+    var segment_map = std.StringArrayHashMap(std.ArrayList(Segment)).init(gpa);
+    defer for (segment_map.values()) |val| {
+        val.deinit();
+    } else segment_map.deinit();
+
+    for (self.object.items) |_object| {
+        var object: Object = _object;
+
+        for (object.symtable) |symbol| {
+            if (symbol.isUndefined()) continue;
+            if (symbol.kind != .data) continue;
+            const data_symbol = symbol.kind.data;
+            const segment_info = object.segment_info[data_symbol.index.?];
+
+            const result = try segment_map.getOrPut(segment_info.outputName());
+            if (!result.found_existing) {
+                result.value_ptr.* = std.ArrayList(Segment).init(gpa);
+            }
+
+            var segment: Segment = .{
+                .name = segment_info.name,
+                .alignment = segment_info.alignment,
+                .offset = data_symbol.offset.?,
+                .flags = segment_info.flags,
+                .size = data_symbol.size.?,
+            };
+
+            if (result.value_ptr.*.popOrNull()) |prev| {
+                segment.offset += prev.size;
+                result.value_ptr.*.appendAssumeCapacity(prev);
+            }
+
+            try result.value_ptr.*.append(segment);
+        }
+    }
+}
+
+/// Sets up the memory section of the wasm module, as well as the stack.
+fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
+    log.debug("Setting up memory layout", .{});
+    _ = gpa;
+    const page_size = 64 * 1024;
+    const stack_size = page_size * 1;
+    const stack_alignment = 16;
+    var memory_ptr: u64 align(stack_alignment) = 0;
+
+    // TODO: Calculate this according to user input
+    memory_ptr += stack_size;
+
+    // set stack value on global
+    const global: *spec.sections.Global = &self.globals.items[stack_symbol.?.index().?];
+    global.init.i32_const = @intCast(i32, @bitCast(i64, memory_ptr));
+
+    // setup memory TODO: Calculate based on data segments and configered pages by user
+    try self.memories.append(gpa, .{
+        .limits = .{
+            .min = 0,
+            .max = 2,
+        },
+    });
+}

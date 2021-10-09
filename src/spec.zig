@@ -253,63 +253,6 @@ pub const sections = struct {
     };
 };
 
-pub const Instruction = struct {
-    opcode: wasm.Opcode,
-    secondary: ?SecondaryOpcode = null,
-    value: InstrValue,
-
-    pub const InstrValue = union {
-        none: void,
-        u32: u32,
-        i32: i32,
-        i64: i64,
-        f32: f32,
-        f64: f64,
-        reftype: RefType,
-        blocktype: BlockType,
-        multi_valtype: struct {
-            data: [*]ValueType,
-            len: u32,
-        },
-        multi: struct {
-            x: u32,
-            y: u32,
-        },
-        list: struct {
-            data: [*]u32,
-            len: u32,
-        },
-    };
-};
-
-/// Secondary opcode belonging to primary opcodes
-/// that have as opcode 0xFC
-pub const SecondaryOpcode = enum(u8) {
-    i32_trunc_sat_f32_s = 0,
-    i32_trunc_sat_f32_u = 1,
-    i32_trunc_sat_f64_s = 2,
-    i32_trunc_sat_f64_u = 3,
-    i64_trunc_sat_f32_s = 4,
-    i64_trunc_sat_f32_u = 5,
-    i64_trunc_sat_f64_s = 6,
-    i64_trunc_sat_f64_u = 7,
-    memory_init = 8,
-    data_drop = 9,
-    memory_copy = 10,
-    memory_fill = 11,
-    table_init = 12,
-    table_drop = 13,
-    table_copy = 14,
-    table_grow = 15,
-    table_size = 16,
-    table_fill = 17,
-    _,
-};
-
-pub const need_secondary = @intToEnum(wasm.Opcode, 0xFC);
-pub const table_get = @intToEnum(wasm.Opcode, 0x25);
-pub const table_set = @intToEnum(wasm.Opcode, 0x26);
-
 pub const Relocation = struct {
     /// Represents the type of the `Relocation`
     relocation_type: Type,
@@ -400,6 +343,20 @@ pub const Segment = struct {
     alignment: u32,
     /// Bitfield containing flags for a segment
     flags: u32,
+
+    fn outputName(self: Segment) []const u8 {
+        if (std.mem.startsWith(u8, self.name, ".rodata.")) {
+            return ".rodata";
+        } else if (std.mem.startsWith(u8, self.name, ".text.")) {
+            return ".text";
+        } else if (std.mem.startsWith(u8, self.name, ".rodata.")) {
+            return ".rodata";
+        } else if (std.mem.startsWith(u8, self.name, ".data.")) {
+            return ".data";
+        } else if (std.mem.startsWith(u8, self.name, ".bss.")) {
+            return ".bss";
+        }
+    }
 };
 
 pub const InitFunc = struct {
