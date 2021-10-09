@@ -221,6 +221,17 @@ fn emitMemory(mem: spec.sections.Memory, writer: anytype) !void {
 fn emitGlobal(global: spec.sections.Global, writer: anytype) !void {
     try leb.writeULEB128(writer, @enumToInt(global.valtype));
     try leb.writeULEB128(writer, @boolToInt(global.mutable));
+    switch (global.init) {
+        .i32_const => |val| {
+            try leb.writeULEB128(writer, std.wasm.opcode(.i32_const));
+            try leb.writeILEB128(writer, val);
+        },
+        .global_get => |index| {
+            try leb.writeULEB128(writer, std.wasm.opcode(.global_get));
+            try leb.writeULEB128(writer, index);
+        },
+    }
+    try leb.writeULEB128(writer, std.wasm.opcode(.end));
 }
 
 fn emitExport(exported: spec.sections.Export, writer: anytype) !void {

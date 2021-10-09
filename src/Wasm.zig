@@ -60,6 +60,9 @@ exported_symbols: std.ArrayListUnmanaged(*spec.Symbol) = .{},
 
 const max_load = std.hash_map.default_max_load_percentage;
 
+// a global variable that defines the stack pointer of the program
+var stack_symbol: ?spec.Symbol = null;
+
 const ImportKey = struct {
     module_name: []const u8,
     name: []const u8,
@@ -124,6 +127,7 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.exports.deinit(gpa);
     self.tables.deinit(gpa);
     self.code.deinit(gpa);
+    self.memories.deinit(gpa);
     self.file.close();
     self.* = undefined;
 }
@@ -151,6 +155,8 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
         try self.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
 
+    try self.setupLinkerSymbols(gpa);
+    try self.setupMemory(gpa);
     try self.reindex(gpa);
     try self.setupTypes(gpa);
     try self.setupExports(gpa);
@@ -404,6 +410,35 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
         try self.exported_symbols.append(gpa, entry.symbol);
     }
     log.debug("Completed building exports. Total count: ({d})", .{self.exports.items.len});
+}
+
+/// Creates symbols that are made by the linker, rather than the compiler/object file
+fn setupLinkerSymbols(self: *Wasm, gpa: *Allocator) !void {
+    // Create symbol for our stack pointer
+    stack_symbol = try self.createGlobal(gpa, "__stack_pointer", .mutable, .i32);
+}
+
+fn createGlobal(
+    self: *Wasm,
+    gpa: *Allocator,
+    name: []const u8,
+    mutability: enum { mutable, immutable },
+    valtype: spec.ValueType,
+) !spec.Symbol {
+    var global: spec.sections.Global = .{
+        .valtype = valtype,
+        .mutable = mutability == .mutable,
+        .init = .{ .i32_const = 0 },
+        .global_idx = @intToEnum(spec.indexes.Global, @intCast(u32, self.globals.items.len)),
+    };
+    try self.globals.append(gpa, global);
+
+    var sym: spec.Symbol = .{
+        .flags = 0,
+        .name = name,
+        .kind = .{ .global = .{ .index = @enumToInt(global.global_idx) } },
+    };
+    return sym;
 }
 
 const SymbolIterator = struct {

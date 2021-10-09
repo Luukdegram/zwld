@@ -479,6 +479,10 @@ pub const Symbol = struct {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_UNDEFINED) != 0;
     }
 
+    pub fn isDefined(self: Symbol) bool {
+        return !self.isUndefined();
+    }
+
     pub fn isVisible(self: Symbol) bool {
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_VISIBILITY_HIDDEN) == 0;
     }
@@ -492,6 +496,9 @@ pub const Symbol = struct {
     }
 
     pub fn isExported(self: Symbol) bool {
+        if (self.isDefined() and self.isWeak()) return true;
+        if (self.isUndefined()) return false;
+        if (self.isVisible()) return true;
         return self.flags & @enumToInt(SymbolFlag.WASM_SYM_EXPORTED) != 0;
     }
 
