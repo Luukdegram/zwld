@@ -52,7 +52,12 @@ code: struct {
     bodies: []spec.sections.Code,
 } = .{ .bodies = &.{}, .index = undefined },
 /// Parsed data section
-data: []const spec.sections.Data = &.{},
+data: struct {
+    /// Index of this section within the module
+    index: u32,
+    /// All data segments
+    segments: []const spec.sections.Data = &.{},
+},
 /// Represents the function ID that must be called on startup.
 /// This is `null` by default as runtimes may determine the startup
 /// function themselves. This is essentially legacy.
@@ -330,6 +335,19 @@ fn Parser(comptime ReaderType: type) type {
                                 .offset = @intCast(u32, start - reader.context.bytes_left),
                             };
                             try reader.readNoEof(code.data);
+                        }
+                    },
+                    .data => {
+                        var start = reader.context.bytes_left;
+                        self.object.data.index = @intCast(u32, self.sections.items.len - 1);
+                        for (try readVec(self.object.data.segments)) |*segment| {
+                            segment.index = try readEnum(spec.indexes.Mem, reader);
+                            segment.offset = try readInit(reader);
+                            const init_len = try readLeb(u32, reader);
+                            segment.seg_offset = @intCast(u32, start - reader.context.bytes_left);
+                            const init_data = try gpa.alloc(u8, init_len);
+                            try reader.readNoEof(init_data);
+                            segment.data = init_data;
                         }
                     },
                     else => try self.reader.reader().skipBytes(len, .{}),

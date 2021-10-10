@@ -535,6 +535,8 @@ const Segment = struct {
     offset: u32,
     flags: u32,
     size: u32,
+    index: u32,
+    file: u16,
 };
 
 fn relocateData(self: *Wasm, gpa: *Allocator) !void {
@@ -546,15 +548,14 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
         val.deinit();
     } else segment_map.deinit();
 
-    for (self.object.items) |_object| {
-        var object: Object = _object;
-
+    for (self.object.items) |object, object_index| {
         for (object.symtable) |symbol| {
             if (symbol.isUndefined()) continue;
             if (symbol.kind != .data) continue;
             const data_symbol = symbol.kind.data;
             const segment_info = object.segment_info[data_symbol.index.?];
 
+            log.debug("Merging segment {s}", .{segment_info.name});
             const result = try segment_map.getOrPut(segment_info.outputName());
             if (!result.found_existing) {
                 result.value_ptr.* = std.ArrayList(Segment).init(gpa);
@@ -566,6 +567,8 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
                 .offset = data_symbol.offset.?,
                 .flags = segment_info.flags,
                 .size = data_symbol.size.?,
+                .index = data_symbol.index.?,
+                .file = @intCast(u16, object_index),
             };
 
             if (result.value_ptr.*.popOrNull()) |prev| {
@@ -574,6 +577,49 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
             }
 
             try result.value_ptr.*.append(segment);
+        }
+    }
+
+    var segment_it = segment_map.iterator();
+    while (segment_it.next()) |entry| {
+        const segment_list: std.ArrayList(Segment) = entry.value_ptr.*;
+
+        // perform relocations
+        for (segment_list.items) |segment| {
+            const object: Object = self.objects.items[segment.file];
+            const data = object.data.segments[segment.index];
+
+            if (object.relocations.get(object.data.index)) |relocations| {
+                for (relocations) |_rel| {
+                    const rel: spec.Relocation = _rel;
+
+                    if (!isInbetween(data.seg_offset, data.data.len, rel.offset)) {
+                        continue;
+                    }
+
+                    const symbol: spec.Symbol = object.symtable[rel.index];
+                    const data_offset = rel.offset - data.seg_offset;
+                    switch (rel.relocation_type) {
+                        .R_WASM_TABLE_INDEX_I32 => {
+                            const index: u32 = if (symbol.isUndefined()) blk: {
+                                const import = object.imports[symbol.index().?];
+                                break :blk self.imported_tables.get(.{ .module_name = import.module_name, .name = import.name }).?;
+                            } else @enumToInt(object.tables[symbol.index().?].table_idx);
+                            log.debug("Relocating symbol '{s}' at offset={x:0>8} segment_offset=0x{x:0>8} index({d})", .{
+                                symbol.name,
+                                rel.offset,
+                                data_offset,
+                                index,
+                            });
+                            leb.writeUnsignedFixed(5, data.data[data_offset..][0..5], index);
+                        },
+                        else => |ty| {
+                            log.debug("TODO: Relocate data for type {}", .{ty});
+                            continue;
+                        },
+                    }
+                }
+            }
         }
     }
 }
@@ -585,7 +631,8 @@ fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
     const page_size = 64 * 1024;
     const stack_size = page_size * 1;
     const stack_alignment = 16;
-    var memory_ptr: u64 align(stack_alignment) = 0;
+    var memory_ptr: u64 = 0;
+    memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
 
     // TODO: Calculate this according to user input
     memory_ptr += stack_size;

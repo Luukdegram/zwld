@@ -210,6 +210,9 @@ pub const sections = struct {
     pub const Table = struct {
         limits: Limits,
         reftype: RefType,
+
+        /// Index into the list of tables of the wasm module
+        table_idx: indexes.Table,
     };
 
     pub const Memory = struct {
@@ -250,6 +253,8 @@ pub const sections = struct {
         index: indexes.Mem,
         offset: InitExpression,
         data: []const u8,
+        /// Offset within the data section itself
+        seg_offset: u32,
     };
 };
 
@@ -436,8 +441,8 @@ pub const Symbol = struct {
     /// host environment or not
     pub fn requiresImport(self: Symbol) bool {
         if (self.kind == .data) return false;
-        if (!self.isUndefined() and self.isWeak()) return true;
-        if (!self.isUndefined()) return false;
+        if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
+        if (self.isDefined()) return false;
         if (self.isWeak()) return false;
 
         return true;
