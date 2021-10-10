@@ -57,7 +57,7 @@ data: struct {
     index: u32,
     /// All data segments
     segments: []const spec.sections.Data = &.{},
-},
+} = .{ .index = undefined, .segments = &.{} },
 /// Represents the function ID that must be called on startup.
 /// This is `null` by default as runtimes may determine the startup
 /// function themselves. This is essentially legacy.
@@ -324,10 +324,8 @@ fn Parser(comptime ReaderType: type) type {
                     },
                     .code => {
                         var start = reader.context.bytes_left;
-                        const count = try readLeb(u32, reader);
-                        self.object.code.bodies = try gpa.alloc(spec.sections.Code, count);
                         self.object.code.index = @intCast(u32, self.sections.items.len - 1);
-                        for (self.object.code.bodies) |*code, index| {
+                        for (try readVec(&self.object.code.bodies, reader, gpa)) |*code, index| {
                             const code_len = try readLeb(u32, reader);
                             code.* = .{
                                 .data = try gpa.alloc(u8, code_len),
@@ -340,7 +338,7 @@ fn Parser(comptime ReaderType: type) type {
                     .data => {
                         var start = reader.context.bytes_left;
                         self.object.data.index = @intCast(u32, self.sections.items.len - 1);
-                        for (try readVec(self.object.data.segments)) |*segment| {
+                        for (try readVec(&self.object.data.segments, reader, gpa)) |*segment| {
                             segment.index = try readEnum(spec.indexes.Mem, reader);
                             segment.offset = try readInit(reader);
                             const init_len = try readLeb(u32, reader);

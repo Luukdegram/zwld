@@ -252,7 +252,7 @@ pub const sections = struct {
     pub const Data = struct {
         index: indexes.Mem,
         offset: InitExpression,
-        data: []const u8,
+        data: []u8,
         /// Offset within the data section itself
         seg_offset: u32,
     };
@@ -349,7 +349,7 @@ pub const Segment = struct {
     /// Bitfield containing flags for a segment
     flags: u32,
 
-    fn outputName(self: Segment) []const u8 {
+    pub fn outputName(self: Segment) []const u8 {
         if (std.mem.startsWith(u8, self.name, ".rodata.")) {
             return ".rodata";
         } else if (std.mem.startsWith(u8, self.name, ".text.")) {
@@ -361,6 +361,7 @@ pub const Segment = struct {
         } else if (std.mem.startsWith(u8, self.name, ".bss.")) {
             return ".bss";
         }
+        unreachable;
     }
 };
 

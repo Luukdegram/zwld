@@ -38,6 +38,8 @@ exports: std.ArrayListUnmanaged(spec.sections.Export) = .{},
 elements: std.ArrayListUnmanaged(spec.sections.Element) = .{},
 /// Output code section
 code: std.ArrayListUnmanaged([]u8) = .{},
+/// Output data section
+data: std.ArrayListUnmanaged(spec.sections.Data) = .{},
 
 // IMPORTS //
 /// Table where the key is represented by an import.
@@ -114,6 +116,9 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.global_symbols.keys()) |name| {
         gpa.free(name);
     }
+    for (self.data.items) |data| {
+        gpa.free(data.data);
+    }
     self.imported_functions.deinit(gpa);
     self.imported_globals.deinit(gpa);
     self.imported_tables.deinit(gpa);
@@ -128,6 +133,7 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.tables.deinit(gpa);
     self.code.deinit(gpa);
     self.memories.deinit(gpa);
+    self.data.deinit(gpa);
     self.file.close();
     self.* = undefined;
 }
@@ -161,6 +167,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.setupTypes(gpa);
     try self.setupExports(gpa);
     try self.relocateCode(gpa);
+    try self.relocateData(gpa);
 
     try @import("emit_wasm.zig").emit(self);
 }
@@ -548,7 +555,7 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
         val.deinit();
     } else segment_map.deinit();
 
-    for (self.object.items) |object, object_index| {
+    for (self.objects.items) |object, object_index| {
         for (object.symtable) |symbol| {
             if (symbol.isUndefined()) continue;
             if (symbol.kind != .data) continue;
@@ -581,8 +588,12 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
     }
 
     var segment_it = segment_map.iterator();
+    var offset: u32 = 0;
     while (segment_it.next()) |entry| {
         const segment_list: std.ArrayList(Segment) = entry.value_ptr.*;
+
+        var segment_data = std.ArrayList(u8).init(gpa);
+        defer segment_data.deinit();
 
         // perform relocations
         for (segment_list.items) |segment| {
@@ -593,7 +604,7 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
                 for (relocations) |_rel| {
                     const rel: spec.Relocation = _rel;
 
-                    if (!isInbetween(data.seg_offset, data.data.len, rel.offset)) {
+                    if (!isInbetween(data.seg_offset, @intCast(u32, data.data.len), rel.offset)) {
                         continue;
                     }
 
@@ -604,7 +615,7 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
                             const index: u32 = if (symbol.isUndefined()) blk: {
                                 const import = object.imports[symbol.index().?];
                                 break :blk self.imported_tables.get(.{ .module_name = import.module_name, .name = import.name }).?;
-                            } else @enumToInt(object.tables[symbol.index().?].table_idx);
+                            } else @enumToInt(symbol.kind.function.func.?.func_idx);
                             log.debug("Relocating symbol '{s}' at offset={x:0>8} segment_offset=0x{x:0>8} index({d})", .{
                                 symbol.name,
                                 rel.offset,
@@ -620,7 +631,17 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
                     }
                 }
             }
+
+            try segment_data.appendSlice(data.data);
         }
+
+        try self.data.append(gpa, .{
+            .index = @intToEnum(spec.indexes.Mem, 0),
+            .offset = .{ .i32_const = @bitCast(i32, offset) },
+            .data = segment_data.toOwnedSlice(),
+            .seg_offset = 0,
+        });
+        offset += @intCast(u32, segment_data.items.len);
     }
 }
 
