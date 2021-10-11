@@ -664,8 +664,8 @@ fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
     // setup memory TODO: Calculate based on data segments and configered pages by user
     try self.memories.append(gpa, .{
         .limits = .{
-            .min = 0,
-            .max = 2,
+            .min = 2,
+            .max = null,
         },
     });
 }
