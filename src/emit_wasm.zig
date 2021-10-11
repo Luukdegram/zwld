@@ -98,7 +98,15 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .code, wasm.code.items.len);
     }
-    log.debug("TODO: Data section", .{});
+
+    if (wasm.data.items.len != 0) {
+        log.debug("Writing 'Data' section ({d})", .{wasm.data.items.len});
+        const offset = try reserveSectionHeader(file);
+        for (wasm.data.items) |data| {
+            try emitData(data, writer);
+        }
+        try emitSectionHeader(file, offset, .data, wasm.data.items.len);
+    }
 }
 
 fn emitWasmHeader(writer: anytype) !void {
@@ -221,7 +229,11 @@ fn emitMemory(mem: spec.sections.Memory, writer: anytype) !void {
 fn emitGlobal(global: spec.sections.Global, writer: anytype) !void {
     try leb.writeULEB128(writer, @enumToInt(global.valtype));
     try leb.writeULEB128(writer, @boolToInt(global.mutable));
-    switch (global.init) {
+    try emitInitExpression(global.init, writer);
+}
+
+fn emitInitExpression(init: spec.InitExpression, writer: anytype) !void {
+    switch (init) {
         .i32_const => |val| {
             try leb.writeULEB128(writer, std.wasm.opcode(.i32_const));
             try leb.writeILEB128(writer, val);
@@ -245,4 +257,11 @@ fn emitElement(element: spec.sections.Element, writer: anytype) !void {
     _ = element;
     _ = writer;
     // TODO
+}
+
+fn emitData(data: spec.sections.Data, writer: anytype) !void {
+    try leb.writeULEB128(writer, @as(u32, 0));
+    try emitInitExpression(data.offset, writer);
+    try leb.writeULEB128(writer, @intCast(u32, data.data.len));
+    try writer.writeAll(data.data);
 }

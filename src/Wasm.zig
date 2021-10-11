@@ -60,6 +60,9 @@ imported_symbols: std.ArrayListUnmanaged(SymbolWithLoc) = .{},
 /// A list of symbols which are to be exported
 exported_symbols: std.ArrayListUnmanaged(*spec.Symbol) = .{},
 
+/// A list of indirect function calls used for the indirect table
+indirect_functions: std.ArrayListUnmanaged(spec.indexes.Func) = .{},
+
 const max_load = std.hash_map.default_max_load_percentage;
 
 // a global variable that defines the stack pointer of the program
@@ -134,6 +137,7 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.code.deinit(gpa);
     self.memories.deinit(gpa);
     self.data.deinit(gpa);
+    self.indirect_functions.deinit(gpa);
     self.file.close();
     self.* = undefined;
 }
@@ -608,21 +612,17 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
                         continue;
                     }
 
-                    const symbol: spec.Symbol = object.symtable[rel.index];
-                    const data_offset = rel.offset - data.seg_offset;
+                    const symbol: *spec.Symbol = &object.symtable[rel.index];
                     switch (rel.relocation_type) {
                         .R_WASM_TABLE_INDEX_I32 => {
-                            const index: u32 = if (symbol.isUndefined()) blk: {
-                                const import = object.imports[symbol.index().?];
-                                break :blk self.imported_tables.get(.{ .module_name = import.module_name, .name = import.name }).?;
-                            } else @enumToInt(symbol.kind.function.func.?.func_idx);
-                            log.debug("Relocating symbol '{s}' at offset={x:0>8} segment_offset=0x{x:0>8} index({d})", .{
+                            const index = symbol.kind.function.func.?.func_idx;
+                            symbol.setTableIndex(@intCast(u32, self.indirect_functions.items.len));
+                            try self.indirect_functions.append(gpa, index);
+
+                            log.debug("Relocation: Created table entry for symbol '{s}' with index {}", .{
                                 symbol.name,
-                                rel.offset,
-                                data_offset,
                                 index,
                             });
-                            leb.writeUnsignedFixed(5, data.data[data_offset..][0..5], index);
                         },
                         else => |ty| {
                             log.debug("TODO: Relocate data for type {}", .{ty});
@@ -648,7 +648,6 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
 /// Sets up the memory section of the wasm module, as well as the stack.
 fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Setting up memory layout", .{});
-    _ = gpa;
     const page_size = 64 * 1024;
     const stack_size = page_size * 1;
     const stack_alignment = 16;

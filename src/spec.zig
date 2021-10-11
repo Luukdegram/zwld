@@ -385,9 +385,6 @@ pub const Symbol = struct {
     flags: u32,
     /// Symbol name, when undefined this will be taken from the import.
     name: []const u8,
-    /// Index into the symbol table of the final file
-    /// It's illegal to read this before it's set.
-    output_index: u32 = undefined,
     /// An union that represents both the type of symbol
     /// as well as the data it holds.
     kind: Kind,
@@ -438,6 +435,18 @@ pub const Symbol = struct {
         };
     }
 
+    /// Sets the table index for the given symbol.
+    /// Asserts the symbol is a function.
+    pub fn setTableIndex(self: *Symbol, table_index: u32) void {
+        self.kind.function.table_index = @intToEnum(indexes.Table, table_index);
+    }
+
+    /// Returns the table index of the symbol.
+    /// Asserts the given symbol is a function symbol.
+    pub fn getTableIndex(self: *Symbol) ?u32 {
+        return self.kind.function.table_index;
+    }
+
     /// Verifies if the given symbol should be imported from the
     /// host environment or not
     pub fn requiresImport(self: Symbol) bool {
@@ -463,6 +472,9 @@ pub const Symbol = struct {
         index: u32,
         /// Pointer to the function representing this symbol
         func: ?*const sections.Func,
+        /// When set, this function is an indirect function call
+        /// and this index represents its position within the table.
+        table_index: ?indexes.Table = null,
     };
 
     pub const Event = struct {
