@@ -127,7 +127,16 @@ pub fn main() !void {
         printErrorAndExit("Missing output path", .{});
     }
 
-    var wasm_bin = try Wasm.openPath(output_path.?);
+    var wasm_bin = try Wasm.openPath(output_path.?, .{
+        .entry_name = entry_name,
+        .import_memory = import_memory,
+        .import_table = import_table,
+        .initial_memory = initial_memory,
+        .max_memory = max_memory,
+        .merge_data_segments = merge_data_segments,
+        .no_entry = no_entry,
+        .stack_first = stack_first,
+    });
     defer wasm_bin.deinit(gpa);
 
     try wasm_bin.addObjects(gpa, positionals.items);

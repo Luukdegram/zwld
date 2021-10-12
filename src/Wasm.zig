@@ -14,6 +14,8 @@ const log = std.log.scoped(.zwld);
 
 /// The binary file that we will write the final binary data to
 file: fs.File,
+/// Configuration of the linker provided by the user
+options: Options,
 /// A list with references to objects we link to during `flush()`
 objects: std.ArrayListUnmanaged(Object) = .{},
 /// A map of global names to their symbol location in an object file
@@ -97,16 +99,40 @@ pub const SymbolWithLoc = struct {
     file: u16,
 };
 
+/// Options to pass to our linker which affects
+/// the end result and tells the linker how to build the final binary.
+pub const Options = struct {
+    /// When the entry name is different than `_start`
+    entry_name: ?[]const u8 = null,
+    /// Tells the linker we will import memory from the host environment
+    import_memory: bool = false,
+    /// Tells the linker we will import the function table from the host environment
+    import_table: bool = false,
+    /// Sets the initial memory of the data section
+    /// Providing a value too low will result in a linking error.
+    initial_memory: ?u32 = null,
+    /// Sets the max memory for the data section.
+    /// Will result in a linking error when it's smaller than `initial_memory`m
+    /// or when the initial memory calculated by the linker is larger than the given maximum memory.
+    max_memory: ?u32 = null,
+    /// Tell the linker to merge data segments
+    merge_data_segments: bool = false,
+    /// Tell the linker we do not require a starting entry
+    no_entry: bool = false,
+    /// Tell the linker to put the stack first, instead of after the data
+    stack_first: bool = false,
+};
+
 /// Initializes a new wasm binary file at the given path.
 /// Will overwrite any existing file at said path.
-pub fn openPath(path: []const u8) !Wasm {
+pub fn openPath(path: []const u8, options: Options) !Wasm {
     const file = try fs.cwd().createFile(path, .{
         .truncate = true,
         .read = true,
     });
     errdefer file.close();
 
-    return Wasm{ .file = file };
+    return Wasm{ .file = file, .options = options };
 }
 
 /// Releases any resources that is owned by `Wasm`,
