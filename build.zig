@@ -14,7 +14,6 @@ pub fn build(b: *std.build.Builder) void {
     const enable_logging = b.option(bool, "enable-logging", "Enables logging to stderr [default: false]") orelse false;
 
     const exe = b.addExecutable("zwld", "src/main.zig");
-    exe.addPackagePath("clap", "lib/zig-clap/clap.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
 

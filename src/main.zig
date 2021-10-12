@@ -1,14 +1,11 @@
-const clap = @import("clap");
-const Linker = @import("Linker.zig");
-const Object = @import("Object.zig");
-const spec = @import("spec.zig");
 const std = @import("std");
 const Wasm = @import("Wasm.zig");
+const mem = std.mem;
 
 const io = std.io;
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const ally = &gpa.allocator;
+var gpa_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+const gpa = &gpa_allocator.allocator;
 
 pub fn log(
     comptime level: std.log.Level,
@@ -21,112 +18,132 @@ pub fn log(
     }
 }
 
+const usage =
+    \\Usage: zwld [options] [files...] -o [path]
+    \\
+    \\Options:
+    \\-h, --help                         Print this help and exit
+    \\--entry <entry>                    Name of entry point symbol
+    \\--import-memory                    Import memory from the host environment
+    \\--import-table                     Import function table from the host environment
+    \\--initial-memory=<value>           Initial size of the linear memory
+    \\--max-memory=<value>               Maximum size of the linear memory
+    \\--merge-data-segments              Enable merging data segments
+    \\--no-entry                         Do not output any entry point
+    \\--stack-first                      Place stack at start of linear memory instead of after data
+;
+
 pub fn main() !void {
     defer if (std.builtin.mode == .Debug) {
-        _ = gpa.deinit();
-    };
-    const params = comptime [_]clap.Param(clap.Help){
-        clap.parseParam("    --help             Display this help and exit.              ") catch unreachable,
-        clap.parseParam("-h, --h                Display summaries of the headers of each section.") catch unreachable,
-        clap.parseParam("-o, --output <STR>     Path to file to write output to.") catch unreachable,
-        clap.parseParam("-s, --symbols          Display the symbol table") catch unreachable,
-        clap.parseParam("-r, --reloc            Display the relocations") catch unreachable,
-        clap.parseParam("-a, --all              Displays section headers, symbols and relocations") catch unreachable,
-        clap.parseParam("<FILE>...") catch unreachable,
+        _ = gpa_allocator.deinit();
     };
 
-    var diag: clap.Diagnostic = .{};
-    var args = clap.parse(clap.Help, &params, .{ .diagnostic = &diag }) catch |err| {
-        diag.report(writer(), err) catch {};
-        return;
-    };
-    defer args.deinit();
+    // we use arena for the arguments and its parsing
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    defer arena_allocator.deinit();
+    const arena = &arena_allocator.allocator;
 
-    if (args.flag("--help")) {
-        try clap.help(writer(), &params);
-        return;
+    const process_args = try std.process.argsAlloc(arena);
+    defer std.process.argsFree(arena, process_args);
+
+    const args = process_args[1..]; // exclude 'zwld' binary
+    if (args.len == 0) {
+        printHelpAndExit();
     }
 
-    const positionals = args.positionals();
-    if (positionals.len == 0) {
-        print("Missing file path argument", .{});
-        return;
-    }
-    const path = positionals[0];
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        print("Could not open file: {s}", .{path});
-        return;
-    };
-    defer file.close();
+    var positionals = std.ArrayList([]const u8).init(arena);
+    var entry_name: ?[]const u8 = null;
+    var import_memory: bool = false;
+    var import_table: bool = false;
+    var initial_memory: ?u32 = null;
+    var max_memory: ?u32 = null;
+    var merge_data_segments = false;
+    var no_entry = false;
+    var stack_first = false;
+    var output_path: ?[]const u8 = null;
 
-    if (args.option("-o") != null) {
-        const output_path = args.option("-o").?;
-        try linkFileAndWriteToPath(output_path, positionals);
-        return;
-    }
-
-    var object = try Object.init(ally, file, path);
-    defer object.deinit(ally);
-
-    print("\n{s}:      file format wasm 0x{x:2>0}\n\n", .{ path, object.version });
-
-    if (args.flag("-h") or args.flag("-a")) {
-        try summarizeHeaders(object);
-    }
-    if (args.flag("-s") or args.flag("-a")) {
-        try summarizeSymbols(object);
-    }
-    if (args.flag("-r") or args.flag("-a")) {
-        try summarizeRelocs(object);
-    }
-}
-
-fn summarizeHeaders(object: Object) !void {
-    print("Sections:\n\n", .{});
-    for (object.sections) |section, id| {
-        print("{d: >3}: {s: >10} offset=0x{x:0>8} end=0x{x:0>8} size(0x{x:0>8})\n", .{
-            id,
-            @tagName(section.section_kind),
-            section.offset,
-            section.offset + section.size,
-            section.size,
-        });
-    }
-    print("\n", .{});
-}
-
-fn summarizeSymbols(object: Object) !void {
-    print("Symbol table:\n\n", .{});
-    for (object.symtable) |symbol, i| {
-        print(" {d}: {}\n", .{ i, symbol });
-    }
-    print("\n", .{});
-}
-
-fn summarizeRelocs(object: Object) !void {
-    print("Relocations:\n\n", .{});
-    var it = object.relocations.iterator();
-    while (it.next()) |entry| {
-        print("Relocations for section: {d} [{d}]\n", .{ entry.key_ptr.*, entry.value_ptr.len });
-        const relocs: []const spec.Relocation = entry.value_ptr.*;
-        for (relocs) |relocation| {
-            print(" {}\n", .{relocation});
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
+            printHelpAndExit();
         }
+        if (mem.eql(u8, arg, "--entry")) {
+            if (i + 1 > args.len) printErrorAndExit("Missing entry name argument", .{});
+            entry_name = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (mem.eql(u8, arg, "--import-memory")) {
+            import_memory = true;
+            continue;
+        }
+        if (mem.eql(u8, arg, "--import_table")) {
+            import_table = true;
+            continue;
+        }
+        if (mem.startsWith(u8, arg, "--initial-memory")) {
+            const index = std.mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for initial memory", .{});
+            initial_memory = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch printErrorAndExit(
+                "Could not parse value '{s}' into integer",
+                .{arg[index + 1 ..]},
+            );
+            continue;
+        }
+        if (mem.startsWith(u8, arg, "--max-memory")) {
+            const index = std.mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for max memory", .{});
+            max_memory = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch printErrorAndExit(
+                "Could not parse value '{s}' into integer",
+                .{arg[index + 1 ..]},
+            );
+            continue;
+        }
+        if (mem.eql(u8, arg, "--merge-data-segments")) {
+            merge_data_segments = true;
+            continue;
+        }
+        if (mem.eql(u8, arg, "--no-entry")) {
+            no_entry = true;
+            continue;
+        }
+        if (mem.eql(u8, arg, "--stack-first")) {
+            stack_first = true;
+            continue;
+        }
+        if (mem.eql(u8, arg, "-o")) {
+            if (i + 1 >= args.len) printErrorAndExit("Missing output file argument", .{});
+            output_path = args[i + 1];
+            i += 1;
+            continue;
+        }
+        try positionals.append(arg);
     }
-}
 
-fn linkFileAndWriteToPath(out_path: []const u8, file_paths: []const []const u8) !void {
-    var bin = try Wasm.openPath(out_path);
-    defer bin.deinit(ally);
+    if (positionals.items.len == 0) {
+        printErrorAndExit("Expected one or more object files, none were given", .{});
+    }
 
-    try bin.addObjects(ally, file_paths);
-    try bin.flush(ally);
+    if (output_path == null) {
+        printErrorAndExit("Missing output path", .{});
+    }
+
+    var wasm_bin = try Wasm.openPath(output_path.?);
+    defer wasm_bin.deinit(gpa);
+
+    try wasm_bin.addObjects(gpa, positionals.items);
+    try wasm_bin.flush(gpa);
 }
 
 fn print(comptime fmt: []const u8, args: anytype) void {
-    io.getStdErr().writer().print(fmt, args) catch unreachable;
+    io.getStdOut().writer().print(fmt, args) catch unreachable;
 }
 
-fn writer() std.fs.File.Writer {
-    return io.getStdErr().writer();
+fn printHelpAndExit() noreturn {
+    io.getStdOut().writeAll(usage) catch {};
+    std.process.exit(0);
+}
+
+fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {
+    io.getStdErr().writer().print(fmt, args) catch {};
+    std.process.exit(1);
 }
