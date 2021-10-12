@@ -1,7 +1,7 @@
 const Atom = @This();
 
 const std = @import("std");
-const spec = @import("spec.zig");
+const wasm = @import("data.zig");
 const Wasm = @import("Wasm.zig");
 
 const leb = std.leb;
@@ -20,7 +20,7 @@ contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
 /// Size of the atom, used to calculate section sizes in the final binary
 size: u32,
 /// List of relocations belonging to this atom
-relocs: std.ArrayListUnmanaged(spec.Relocation) = .{},
+relocs: std.ArrayListUnmanaged(wasm.Relocation) = .{},
 /// Contains the binary data of an atom, which can be non-relocated
 code: std.ArrayListUnmanaged(u8) = .{},
 
@@ -80,8 +80,8 @@ pub fn getLast(self: *Atom) *Atom {
     return tmp;
 }
 
-pub fn resolveRelocs(self: *Atom, wasm: *Wasm) !void {
-    const object = wasm.objects.items[self.file];
+pub fn resolveRelocs(self: *Atom, wasm_bin: *Wasm) !void {
+    const object = wasm_bin.objects.items[self.file];
     const symbol = object.symtable[self.sym_index];
 
     log.debug("Resolving relocs in atom '{s}' count({d})", .{

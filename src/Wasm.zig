@@ -1,10 +1,11 @@
 //! Wasm represents the final binary
 const Wasm = @This();
 
+const std = @import("std");
 const Atom = @import("Atom.zig");
 const Object = @import("Object.zig");
-const spec = @import("spec.zig");
-const std = @import("std");
+const wasm = @import("data.zig");
+const Symbol = @import("Symbol.zig");
 
 const leb = std.leb;
 const fs = std.fs;
@@ -23,25 +24,25 @@ global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
-types: std.ArrayListUnmanaged(spec.sections.Type) = .{},
+types: std.ArrayListUnmanaged(wasm.FuncType) = .{},
 /// Output import section
-imports: std.ArrayListUnmanaged(spec.sections.Import) = .{},
+imports: std.ArrayListUnmanaged(wasm.Import) = .{},
 /// Output function section
-functions: std.ArrayListUnmanaged(spec.sections.Func) = .{},
+functions: std.ArrayListUnmanaged(wasm.Func) = .{},
 /// Output table section
-tables: std.ArrayListUnmanaged(spec.sections.Table) = .{},
+tables: std.ArrayListUnmanaged(wasm.Table) = .{},
 /// Output memory section
-memories: std.ArrayListUnmanaged(spec.sections.Memory) = .{},
+memories: std.ArrayListUnmanaged(wasm.Memory) = .{},
 /// Output global section
-globals: std.ArrayListUnmanaged(spec.sections.Global) = .{},
+globals: std.ArrayListUnmanaged(wasm.Global) = .{},
 /// Output export section
-exports: std.ArrayListUnmanaged(spec.sections.Export) = .{},
+exports: std.ArrayListUnmanaged(wasm.Export) = .{},
 /// Output element section
-elements: std.ArrayListUnmanaged(spec.sections.Element) = .{},
+elements: std.ArrayListUnmanaged(wasm.Element) = .{},
 /// Output code section
 code: std.ArrayListUnmanaged([]u8) = .{},
 /// Output data section
-data: std.ArrayListUnmanaged(spec.sections.Data) = .{},
+data: std.ArrayListUnmanaged(wasm.Data) = .{},
 
 // IMPORTS //
 /// Table where the key is represented by an import.
@@ -60,15 +61,15 @@ imported_symbols: std.ArrayListUnmanaged(SymbolWithLoc) = .{},
 
 // EXPORTS //
 /// A list of symbols which are to be exported
-exported_symbols: std.ArrayListUnmanaged(*spec.Symbol) = .{},
+exported_symbols: std.ArrayListUnmanaged(*Symbol) = .{},
 
 /// A list of indirect function calls used for the indirect table
-indirect_functions: std.ArrayListUnmanaged(spec.indexes.Func) = .{},
+indirect_functions: std.ArrayListUnmanaged(u32) = .{},
 
 const max_load = std.hash_map.default_max_load_percentage;
 
 // a global variable that defines the stack pointer of the program
-var stack_symbol: ?spec.Symbol = null;
+var stack_symbol: ?Symbol = null;
 
 const ImportKey = struct {
     module_name: []const u8,
@@ -315,10 +316,7 @@ fn reindex(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merging functions", .{});
     for (self.objects.items) |object| {
         for (object.functions) |*func| {
-            func.func_idx = @intToEnum(
-                spec.indexes.Func,
-                @intCast(u32, self.imported_functions.count() + self.functions.items.len),
-            );
+            func.func_idx = @intCast(u32, self.imported_functions.count() + self.functions.items.len);
             try self.functions.append(gpa, func.*);
         }
     }
@@ -329,17 +327,14 @@ fn reindex(self: *Wasm, gpa: *Allocator) !void {
         log.debug("Merging globals", .{});
         for (self.objects.items) |object| {
             for (object.globals) |*global| {
-                global.global_idx = @intToEnum(
-                    spec.indexes.Global,
-                    @intCast(u32, self.imported_globals.count() + self.globals.items.len),
-                );
+                global.global_idx = @intCast(u32, self.imported_globals.count() + self.globals.items.len);
                 try self.globals.append(gpa, global.*);
             }
         }
 
         var global_index = @intCast(u32, self.imported_globals.count());
         for (self.globals.items) |*global| {
-            global.global_idx = @intToEnum(spec.indexes.Global, global_index);
+            global.global_idx = global_index;
             global_index += 1;
         }
         log.debug("Merged ({d}) globals", .{self.globals.items.len});
@@ -367,10 +362,10 @@ fn reindex(self: *Wasm, gpa: *Allocator) !void {
 /// Checks if any type (read: function signature) already exists within
 /// the type section. When it does exist, it will return its index.
 /// Otherwise, returns `null`.
-fn findType(self: *Wasm, wasm_type: spec.sections.Type) ?usize {
+fn findType(self: *Wasm, wasm_type: wasm.FuncType) ?usize {
     return for (self.types.items) |ty, index| {
-        if (std.mem.eql(spec.ValueType, ty.params, wasm_type.params) and
-            std.mem.eql(spec.ValueType, ty.returns, wasm_type.returns))
+        if (std.mem.eql(wasm.ValueType, ty.params, wasm_type.params) and
+            std.mem.eql(wasm.ValueType, ty.returns, wasm_type.returns))
         {
             return index;
         }
@@ -403,9 +398,9 @@ fn setupTypes(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Building types from functions", .{});
     for (self.functions.items) |*func| {
         if (self.findType(func.func_type.*)) |index| {
-            func.type_idx = @intToEnum(spec.indexes.Type, @intCast(u32, index));
+            func.type_idx = @intCast(u32, index);
         } else {
-            func.type_idx = @intToEnum(spec.indexes.Type, @intCast(u32, self.types.items.len));
+            func.type_idx = @intCast(u32, self.types.items.len);
             try self.types.append(gpa, func.func_type.*);
         }
     }
@@ -423,7 +418,7 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
         if (!symbol.isExported()) continue;
 
         var name: []const u8 = symbol.name;
-        var exported: spec.sections.Export = undefined;
+        var exported: wasm.Export = undefined;
         if (symbol.unwrapAs(.function)) |func| {
             // func cannot be `null` because only defined functions
             // can be exported, which is verified with `isExported()`
@@ -433,7 +428,7 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
             exported = .{
                 .name = name,
                 .kind = .function,
-                .index = @enumToInt(func.func.?.func_idx),
+                .index = func.func.?.func_idx,
             };
         } else {
             log.debug("TODO: Export non-functions", .{});
@@ -460,20 +455,20 @@ fn createGlobal(
     gpa: *Allocator,
     name: []const u8,
     mutability: enum { mutable, immutable },
-    valtype: spec.ValueType,
-) !spec.Symbol {
-    var global: spec.sections.Global = .{
+    valtype: wasm.ValueType,
+) !Symbol {
+    var global: wasm.Global = .{
         .valtype = valtype,
         .mutable = mutability == .mutable,
         .init = .{ .i32_const = 0 },
-        .global_idx = @intToEnum(spec.indexes.Global, @intCast(u32, self.globals.items.len)),
+        .global_idx = @intCast(u32, self.globals.items.len),
     };
     try self.globals.append(gpa, global);
 
-    var sym: spec.Symbol = .{
+    var sym: Symbol = .{
         .flags = 0,
         .name = name,
-        .kind = .{ .global = .{ .index = @enumToInt(global.global_idx) } },
+        .kind = .{ .global = .{ .index = global.global_idx } },
     };
     return sym;
 }
@@ -486,11 +481,11 @@ const SymbolIterator = struct {
     const Entry = struct {
         sym_index: u32,
         file_index: u16,
-        symbol: *spec.Symbol,
+        symbol: *Symbol,
     };
 
-    fn init(wasm: *Wasm) SymbolIterator {
-        return .{ .symbol_index = 0, .file_index = 0, .wasm = wasm };
+    fn init(wasm_bin: *Wasm) SymbolIterator {
+        return .{ .symbol_index = 0, .file_index = 0, .wasm = wasm_bin };
     }
 
     fn next(self: *SymbolIterator) ?Entry {
@@ -520,13 +515,13 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
             const body_length = @intCast(u32, code.data.len);
             // check if we must perform relocations
             if (object.relocations.get(@intCast(u32, object.code.index))) |relocations| {
-                const _rel: []const spec.Relocation = relocations;
+                const _rel: []const wasm.Relocation = relocations;
                 log.debug("Found relocations for function body at index {d}", .{body_index});
                 for (_rel) |rel| {
                     if (!isInbetween(code.offset, body_length, rel.offset)) {
                         continue;
                     }
-                    const symbol: spec.Symbol = object.symtable[rel.index];
+                    const symbol: Symbol = object.symtable[rel.index];
                     const body_offset = rel.offset - code.offset;
                     switch (rel.relocation_type) {
                         .R_WASM_FUNCTION_INDEX_LEB,
@@ -541,7 +536,7 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                             const index: u32 = if (symbol.isUndefined()) blk: {
                                 const import = object.imports[symbol.index().?];
                                 break :blk self.imported_globals.get(.{ .module_name = import.module_name, .name = import.name }).?;
-                            } else @enumToInt(object.globals[symbol.index().?].global_idx);
+                            } else object.globals[symbol.index().?].global_idx;
                             log.debug("Performing relocation for global symbol '{s}' at offset=0x{x:0>8} body_offset=0x{x:0>8} index=({d})", .{
                                 symbol.name,
                                 rel.offset,
@@ -555,7 +550,7 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                 }
             }
             log.debug("Merging code body for {}", .{code.func.func_idx});
-            self.code.items[@enumToInt(code.func.func_idx)] = code.data;
+            self.code.items[code.func.func_idx] = code.data;
         }
     }
 }
@@ -632,13 +627,13 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
 
             if (object.relocations.get(object.data.index)) |relocations| {
                 for (relocations) |_rel| {
-                    const rel: spec.Relocation = _rel;
+                    const rel: wasm.Relocation = _rel;
 
                     if (!isInbetween(data.seg_offset, @intCast(u32, data.data.len), rel.offset)) {
                         continue;
                     }
 
-                    const symbol: *spec.Symbol = &object.symtable[rel.index];
+                    const symbol: *Symbol = &object.symtable[rel.index];
                     switch (rel.relocation_type) {
                         .R_WASM_TABLE_INDEX_I32 => {
                             const index = symbol.kind.function.func.?.func_idx;
@@ -662,7 +657,7 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
         }
 
         try self.data.append(gpa, .{
-            .index = @intToEnum(spec.indexes.Mem, 0),
+            .index = 0,
             .offset = .{ .i32_const = @bitCast(i32, offset) },
             .data = segment_data.toOwnedSlice(),
             .seg_offset = 0,
@@ -684,7 +679,7 @@ fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
     memory_ptr += stack_size;
 
     // set stack value on global
-    const global: *spec.sections.Global = &self.globals.items[stack_symbol.?.index().?];
+    const global: *wasm.Global = &self.globals.items[stack_symbol.?.index().?];
     global.init.i32_const = @intCast(i32, @bitCast(i64, memory_ptr));
 
     // setup memory TODO: Calculate based on data segments and configered pages by user
