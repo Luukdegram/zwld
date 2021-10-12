@@ -23,6 +23,7 @@ const usage =
     \\
     \\Options:
     \\-h, --help                         Print this help and exit
+    \\-o [path]                          Output path of the binary
     \\--entry <entry>                    Name of entry point symbol
     \\--import-memory                    Import memory from the host environment
     \\--import-table                     Import function table from the host environment
@@ -143,12 +144,8 @@ pub fn main() !void {
     try wasm_bin.flush(gpa);
 }
 
-fn print(comptime fmt: []const u8, args: anytype) void {
-    io.getStdOut().writer().print(fmt, args) catch unreachable;
-}
-
 fn printHelpAndExit() noreturn {
-    io.getStdOut().writeAll(usage) catch {};
+    io.getStdOut().writer().print("{s}\n", .{usage}) catch {};
     std.process.exit(0);
 }
 
