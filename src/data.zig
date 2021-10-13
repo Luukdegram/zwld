@@ -161,13 +161,10 @@ pub const Import = struct {
     kind: Kind,
 
     pub const Kind = union(ExternalType) {
-        function: u32,
+        function: Func,
         table: Table,
         memory: Limits,
-        global: struct {
-            valtype: ValueType,
-            mutable: bool,
-        },
+        global: Global,
     };
 };
 
@@ -198,7 +195,7 @@ pub const Memory = struct {
 pub const Global = struct {
     valtype: ValueType,
     mutable: bool,
-    init: InitExpression,
+    init: ?InitExpression = null, // null for imported globals
 
     /// Index into the list of globals of the wasm module
     global_idx: u32,

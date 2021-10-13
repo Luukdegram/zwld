@@ -173,12 +173,9 @@ fn emitImportSymbol(wasm: *Wasm, sym_with_loc: Wasm.SymbolWithLoc) !void {
     };
 
     switch (sym.kind) {
-        .function => |func| import.kind = .{ .function = func.func.?.type_idx },
-        .global => |global| {
-            const obj_global = object.globals[global.index];
-            import.kind = .{ .global = .{ .valtype = obj_global.valtype, .mutable = obj_global.mutable } };
-        },
-        .table => |table| import.kind = .{ .table = object.tables[table.index] },
+        .function => |func| import.kind = .{ .function = func.func.* },
+        .global => |global| import.kind = .{ .global = global.global.* },
+        .table => |table| import.kind = .{ .table = table.table.* },
         else => unreachable,
     }
 
@@ -194,7 +191,7 @@ fn emitImport(import_entry: data.Import, writer: anytype) !void {
 
     try leb.writeULEB128(writer, @enumToInt(import_entry.kind));
     switch (import_entry.kind) {
-        .function => |index| try leb.writeULEB128(writer, index),
+        .function => |func| try leb.writeULEB128(writer, func.type_idx),
         .table => |table| try emitTable(table, writer),
         .global => |global| {
             try leb.writeULEB128(writer, @enumToInt(global.valtype));
@@ -230,7 +227,7 @@ fn emitMemory(mem: data.Memory, writer: anytype) !void {
 fn emitGlobal(global: data.Global, writer: anytype) !void {
     try leb.writeULEB128(writer, @enumToInt(global.valtype));
     try leb.writeULEB128(writer, @boolToInt(global.mutable));
-    try emitInitExpression(global.init, writer);
+    if (global.init) |init| try emitInitExpression(init, writer);
 }
 
 fn emitInitExpression(init: data.InitExpression, writer: anytype) !void {

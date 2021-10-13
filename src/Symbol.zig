@@ -16,7 +16,7 @@ kind: Kind,
 
 /// A union of possible symbol types, providing
 /// access to type-dependent information.
-pub const Kind = union(enum) {
+pub const Kind = union(Tag) {
     function: Function,
     data: Data,
     global: Global,
@@ -24,7 +24,26 @@ pub const Kind = union(enum) {
     event: Event,
     table: Table,
 
-    pub const Tag = std.meta.Tag(Kind);
+    pub const Tag = enum {
+        function,
+        data,
+        global,
+        section,
+        event,
+        table,
+
+        /// From a given symbol kind, returns the `ExternalType`
+        pub fn externalType(self: Tag) wasm.ExternalType {
+            return switch (self) {
+                .function => .function,
+                .global => .global,
+                .data => .memory,
+                .section => unreachable, // Not an external type
+                .event => unreachable, // Not an external type
+                .table => .table,
+            };
+        }
+    };
 };
 
 pub const Flag = enum(u32) {
@@ -116,12 +135,15 @@ pub const Data = struct {
 
 pub const Global = struct {
     index: u32,
+
+    /// Reference to the Global represented by this symbol
+    global: *wasm.Global,
 };
 
 pub const Function = struct {
     index: u32,
     /// Pointer to the function representing this symbol
-    func: ?*const wasm.Func,
+    func: *wasm.Func,
     /// When set, this function is an indirect function call
     /// and this index represents its position within the table.
     table_index: ?u32 = null,
@@ -133,6 +155,9 @@ pub const Event = struct {
 
 pub const Table = struct {
     index: u32,
+
+    /// Reference to a table that is represented by this symbol
+    table: *wasm.Table,
 };
 
 pub fn hasFlag(self: Symbol, flag: Flag) bool {

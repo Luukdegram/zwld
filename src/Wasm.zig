@@ -422,13 +422,13 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
         if (symbol.unwrapAs(.function)) |func| {
             // func cannot be `null` because only defined functions
             // can be exported, which is verified with `isExported()`
-            if (func.func.?.export_name) |export_name| {
+            if (func.func.export_name) |export_name| {
                 name = export_name;
             }
             exported = .{
                 .name = name,
                 .kind = .function,
-                .index = func.func.?.func_idx,
+                .index = func.func.func_idx,
             };
         } else {
             log.debug("TODO: Export non-functions", .{});
@@ -468,7 +468,7 @@ fn createGlobal(
     var sym: Symbol = .{
         .flags = 0,
         .name = name,
-        .kind = .{ .global = .{ .index = global.global_idx } },
+        .kind = .{ .global = .{ .index = global.global_idx, .global = &self.globals.items[global.global_idx] } },
     };
     return sym;
 }
@@ -636,7 +636,7 @@ fn relocateData(self: *Wasm, gpa: *Allocator) !void {
                     const symbol: *Symbol = &object.symtable[rel.index];
                     switch (rel.relocation_type) {
                         .R_WASM_TABLE_INDEX_I32 => {
-                            const index = symbol.kind.function.func.?.func_idx;
+                            const index = symbol.kind.function.func.func_idx;
                             symbol.setTableIndex(@intCast(u32, self.indirect_functions.items.len));
                             try self.indirect_functions.append(gpa, index);
 
@@ -680,7 +680,7 @@ fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
 
     // set stack value on global
     const global: *wasm.Global = &self.globals.items[stack_symbol.?.index().?];
-    global.init.i32_const = @intCast(i32, @bitCast(i64, memory_ptr));
+    global.init = .{ .i32_const = @intCast(i32, @bitCast(i64, memory_ptr)) };
 
     // setup memory TODO: Calculate based on data segments and configered pages by user
     try self.memories.append(gpa, .{

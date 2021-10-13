@@ -31,11 +31,11 @@ sections: []const wasm.Section = &.{},
 /// Parsed type section
 types: []const wasm.FuncType = &.{},
 /// A list of all imports for this module
-imports: []const wasm.Import = &.{},
+imports: []wasm.Import = &.{},
 /// Parsed function section
 functions: []wasm.Func = &.{},
 /// Parsed table section
-tables: []const wasm.Table = &.{},
+tables: []wasm.Table = &.{},
 /// Parsed memory section
 memories: []const wasm.Memory = &.{},
 /// Parsed global section
@@ -102,17 +102,16 @@ pub fn deinit(self: *Object, gpa: *Allocator) void {
     self.* = undefined;
 }
 
-/// Returns a section from a given section type. Will return `null` if the section
-/// does not exist within the wasm module.
-/// Asserts given `section_type` is not `.custom` as custom sections are not unique by type (id)
-/// but by name.
-pub fn sectionByType(self: *Object, section_type: wasm.SectionType) ?wasm.Section {
-    std.debug.assert(section_type != .custom);
-    return for (self.sections) |section| {
-        if (section.section_kind == section_type) {
-            break section;
+/// Finds the import within the list of imports from a given kind and index of that kind.
+/// Asserts the import exists
+pub fn findImport(self: *const Object, import_kind: wasm.ExternalType, index: u32) *wasm.Import {
+    var i: u32 = 0;
+    return for (self.imports) |*import| {
+        if (std.meta.activeTag(import.kind) == import_kind) {
+            if (i == index) return import;
+            i += 1;
         }
-    } else null;
+    } else unreachable; // Only existing imports are allowed to be found
 }
 
 /// Error set containing parsing errors.
@@ -226,7 +225,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .import => {
-                        for (try readVec(&self.object.imports, reader, gpa)) |*import| {
+                        for (try readVec(&self.object.imports, reader, gpa)) |*import, index| {
                             const module_len = try readLeb(u32, reader);
                             const module_name = try gpa.alloc(u8, module_len);
                             try reader.readNoEof(module_name);
@@ -237,11 +236,21 @@ fn Parser(comptime ReaderType: type) type {
 
                             const kind = try readEnum(wasm.ExternalType, reader);
                             const kind_value: wasm.Import.Kind = switch (kind) {
-                                .function => .{ .function = try readLeb(u32, reader) },
+                                .function => .{
+                                    .function = blk: {
+                                        const type_index = try readLeb(u32, reader);
+                                        break :blk wasm.Func{
+                                            .type_idx = type_index,
+                                            .func_idx = @intCast(u32, index),
+                                            .func_type = &self.object.types[type_index],
+                                        };
+                                    },
+                                },
                                 .memory => .{ .memory = try readLimits(reader) },
                                 .global => .{ .global = .{
                                     .valtype = try readEnum(wasm.ValueType, reader),
                                     .mutable = (try reader.readByte()) == 0x01,
+                                    .global_idx = @intCast(u32, index),
                                 } },
                                 .table => .{ .table = .{
                                     .reftype = try readEnum(wasm.RefType, reader),
@@ -563,8 +572,12 @@ fn Parser(comptime ReaderType: type) type {
                 },
                 else => |tag| {
                     const index = try leb.readULEB128(u32, reader);
+                    var maybe_import: ?*wasm.Import = null;
 
                     const is_import = symbol.hasFlag(.WASM_SYM_UNDEFINED);
+                    if (is_import) {
+                        maybe_import = self.object.findImport(kind.externalType(), index);
+                    }
                     const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
                     if (!(is_import and !explicit_name)) {
                         const name_len = try leb.readULEB128(u32, reader);
@@ -572,17 +585,33 @@ fn Parser(comptime ReaderType: type) type {
                         try reader.readNoEof(name);
                         symbol.name = name;
                     } else {
-                        symbol.name = self.object.imports[index].name;
+                        symbol.name = maybe_import.?.name;
                     }
 
                     symbol.kind = switch (tag) {
-                        .function => .{ .function = .{
-                            .index = index,
-                            .func = if (is_import) null else &self.object.functions[index],
-                        } },
-                        .global => .{ .global = .{ .index = index } },
+                        .function => blk: {
+                            const func: *wasm.Func = if (is_import)
+                                &maybe_import.?.kind.function
+                            else
+                                &self.object.functions[index];
+
+                            break :blk .{ .function = .{ .index = index, .func = func } };
+                        },
+                        .global => blk: {
+                            const global = if (is_import)
+                                &maybe_import.?.kind.global
+                            else
+                                &self.object.globals[index];
+                            break :blk .{ .global = .{ .index = index, .global = global } };
+                        },
+                        .table => blk: {
+                            const table = if (is_import)
+                                &maybe_import.?.kind.table
+                            else
+                                &self.object.tables[index];
+                            break :blk .{ .table = .{ .index = index, .table = table } };
+                        },
                         .event => .{ .event = .{ .index = index } },
-                        .table => .{ .table = .{ .index = index } },
                         else => unreachable,
                     };
                 },
