@@ -527,7 +527,7 @@ fn Parser(comptime ReaderType: type) type {
                     for (symbols) |*symbol| {
                         symbol.* = try self.parseSymbol(gpa, reader);
 
-                        log.debug("Found symbol: type({s}) name({s}) flags(0x{x})", .{
+                        log.debug("Found symbol: type({s}) name({s}) flags(0b{b:0>8})", .{
                             @tagName(symbol.kind),
                             symbol.name,
                             symbol.flags,
@@ -560,7 +560,7 @@ fn Parser(comptime ReaderType: type) type {
                     symbol.kind = .{ .data = .{} };
 
                     // Data symbols only have the following fields if the symbol is defined
-                    if (!symbol.hasFlag(.WASM_SYM_UNDEFINED)) {
+                    if (symbol.isDefined()) {
                         symbol.kind.data.index = try leb.readULEB128(u32, reader);
                         symbol.kind.data.offset = try leb.readULEB128(u32, reader);
                         symbol.kind.data.size = try leb.readULEB128(u32, reader);
@@ -574,12 +574,12 @@ fn Parser(comptime ReaderType: type) type {
                     const index = try leb.readULEB128(u32, reader);
                     var maybe_import: ?*wasm.Import = null;
 
-                    const is_import = symbol.hasFlag(.WASM_SYM_UNDEFINED);
-                    if (is_import) {
+                    const is_undefined = symbol.isUndefined();
+                    if (is_undefined) {
                         maybe_import = self.object.findImport(kind.externalType(), index);
                     }
                     const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
-                    if (!(is_import and !explicit_name)) {
+                    if (!(is_undefined and !explicit_name)) {
                         const name_len = try leb.readULEB128(u32, reader);
                         const name = try gpa.alloc(u8, name_len);
                         try reader.readNoEof(name);
@@ -590,7 +590,7 @@ fn Parser(comptime ReaderType: type) type {
 
                     symbol.kind = switch (tag) {
                         .function => blk: {
-                            const func: *wasm.Func = if (is_import)
+                            const func: *wasm.Func = if (is_undefined)
                                 &maybe_import.?.kind.function
                             else
                                 &self.object.functions[index];
@@ -598,14 +598,14 @@ fn Parser(comptime ReaderType: type) type {
                             break :blk .{ .function = .{ .index = index, .func = func } };
                         },
                         .global => blk: {
-                            const global = if (is_import)
+                            const global = if (is_undefined)
                                 &maybe_import.?.kind.global
                             else
                                 &self.object.globals[index];
                             break :blk .{ .global = .{ .index = index, .global = global } };
                         },
                         .table => blk: {
-                            const table = if (is_import)
+                            const table = if (is_undefined)
                                 &maybe_import.?.kind.table
                             else
                                 &self.object.tables[index];

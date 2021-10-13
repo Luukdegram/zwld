@@ -431,7 +431,10 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
                 .index = func.func.func_idx,
             };
         } else {
-            log.debug("TODO: Export non-functions", .{});
+            log.debug("TODO: Export non-functions type({s}) name={s}", .{
+                @tagName(std.meta.activeTag(symbol.kind)),
+                name,
+            });
             continue;
         }
 

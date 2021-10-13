@@ -150,6 +150,8 @@ fn printHelpAndExit() noreturn {
 }
 
 fn printErrorAndExit(comptime fmt: []const u8, args: anytype) noreturn {
-    io.getStdErr().writer().print(fmt, args) catch {};
+    const writer = io.getStdErr().writer();
+    writer.print(fmt, args) catch {};
+    writer.writeByte('\n') catch {};
     std.process.exit(1);
 }
