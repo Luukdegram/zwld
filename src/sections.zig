@@ -11,15 +11,19 @@ const log = std.log.scoped(.zwld);
 /// Output function section, holding a list of all
 /// function with indexes to their type
 pub const Function = struct {
-    indexes: std.ArrayList(*wasm.Func) = .{},
+    /// Holds the list of function type indexes.
+    /// The list is built from merging all defined functions into this single list.
+    /// Once appended, it becomes immutable and should not be mutated outside this list.
+    items: std.ArrayList(wasm.Func) = .{},
 
     /// Adds a new function to the section while also setting the function index
     /// of the `Func` itself.
     pub fn addFunction(self: *Function, gpa: *Allocator, offset: u32, func: *wasm.Func) !void {
         func.func_idx = offset + self.count();
-        try self.indexes.append(gpa, func);
+        try self.indexes.append(gpa, func.*);
     }
 
+    /// Returns the count of entires within the function section
     pub fn count(self: *Function) u32 {
         return @intCast(u32, self.indexes.items.len);
     }
@@ -69,6 +73,8 @@ pub const Import = struct {
 
     /// Appends an import symbol into the list of imports. Based on the type, also appends it
     /// to their respective import list (such as imported_functions)
+    ///
+    /// NOTE: The given symbol must reside within the given `Object`.
     pub fn appendSymbol(self: *Import, gpa: *Allocator, object: Object, symbol: *Symbol) !void {
         const import = object.imports[symbol.index().?]; // Undefined data symbols cannot be imported
         const module_name = import.module_name;
@@ -112,5 +118,102 @@ pub const Import = struct {
             },
             else => unreachable, // programmer error: Given symbol cannot be imported
         }
+    }
+
+    /// Returns the count of functions that have been imported (so far)
+    pub fn functionCount(self: Import) u32 {
+        return @intCast(u32, self.imported_functions.items.len);
+    }
+
+    /// Returns the count of tables that have been imported (so far)
+    pub fn tableCount(self: Import) u32 {
+        return @intCast(u32, self.imported_tables.items.len);
+    }
+
+    /// Returns the count of globals that have been imported (so far)
+    pub fn globalCount(self: Import) u32 {
+        return @intCast(u32, self.imported_globals.items.len);
+    }
+};
+
+/// Represents the output global section, containing a list of globals
+pub const Globals = struct {
+    /// A list of `wasm.Global`s
+    /// Once appended to this list, they should no longer be mutated
+    items: std.ArrayListUnmanaged(wasm.Global) = .{},
+
+    /// Appends a new global and sets the `global_idx` on the global based on the
+    /// current count of globals and the given `offset`.
+    pub fn append(self: *Globals, gpa: *Allocator, offset: u32, global: *wasm.Global) !void {
+        global.global_idx = offset + self.count();
+        try self.globals.append(gpa, global.*);
+    }
+
+    /// Returns the total amount of globals of the global section
+    pub fn count(self: Globals) u32 {
+        return @intCast(u32, self.items.len);
+    }
+};
+
+/// Represents the type section, containing a list of
+/// wasm signature types.
+pub const Types = struct {
+    /// A list of `wasm.FuncType`, when appending to
+    /// this list, duplicates will be removed.
+    ///
+    /// TODO: Would a hashmap be more efficient?
+    items: std.ArrayListUnmanaged(wasm.FuncType) = .{},
+
+    /// Checks if a given type is already present within the list of types.
+    /// If not, the given type will be appended to the list.
+    /// In all cases, this will return the index within the list of types.
+    pub fn append(self: *Types, gpa: *Allocator, func_type: wasm.FuncType) !u32 {
+        return self.find(func_type) orelse {
+            const index = self.count();
+            try self.items.append(gpa, func_type);
+            return index;
+        };
+    }
+
+    /// Checks if any type (read: function signature) already exists within
+    /// the type section. When it does exist, it will return its index
+    /// otherwise, returns `null`.
+    pub fn find(self: Types, func_type: wasm.FuncType) ?u32 {
+        return for (self.types.items) |ty, index| {
+            if (std.mem.eql(wasm.ValueType, ty.params, func_type.params) and
+                std.mem.eql(wasm.ValueType, ty.returns, func_type.returns))
+            {
+                return @intCast(u32, index);
+            }
+        } else null;
+    }
+
+    /// Returns the amount of entries in the type section
+    pub fn count(self: Types) u32 {
+        return @intCast(u32, self.items.len);
+    }
+};
+
+/// Represents the table section, containing a list
+/// of tables, as well as the definition of linker-defined
+/// tables such as the indirect function table
+pub const Tables = struct {
+    /// The list of tables that have been merged from all
+    /// object files. This does not include any linker-defined
+    /// tables. Once inserted in this list, the object becomes immutable.
+    items: std.ArrayListUnmanaged(wasm.Table) = .{},
+
+    /// Appends a new table to the list of tables and sets its index to
+    /// the position within the list of tables.
+    pub fn append(self: *Tables, gpa: *Allocator, offset: u32, table: *wasm.Table) !void {
+        const index = offset + self.count();
+        _ = index;
+        // TODO: Add a 'table_idx' field to wasm.Table
+        try self.items.append(gpa, table.*);
+    }
+
+    /// Returns the amount of entries in the table section
+    pub fn count(self: Tables) u32 {
+        return @intCast(u32, self.items.len);
     }
 };
