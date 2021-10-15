@@ -186,6 +186,9 @@ pub const Func = struct {
 pub const Table = struct {
     limits: Limits,
     reftype: RefType,
+
+    /// Represents the index within the list of tables
+    table_idx: u32,
 };
 
 pub const Memory = struct {

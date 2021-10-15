@@ -20,13 +20,13 @@ pub fn emit(wasm: *Wasm) !void {
     try emitWasmHeader(writer);
 
     // emit sections
-    if (wasm.types.items.len != 0) {
-        log.debug("Writing 'Types' section ({d})", .{wasm.types.items.len});
+    if (wasm.types.count() != 0) {
+        log.debug("Writing 'Types' section ({d})", .{wasm.types.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.types.items) |type_entry| {
+        for (wasm.types.items.items) |type_entry| {
             try emitType(type_entry, writer);
         }
-        try emitSectionHeader(file, offset, .type, wasm.types.items.len);
+        try emitSectionHeader(file, offset, .type, wasm.types.count());
     }
     if (wasm.imports.items.len != 0) {
         log.debug("Writing 'Imports' section ({d})", .{wasm.imports.items.len + wasm.imported_symbols.items.len});

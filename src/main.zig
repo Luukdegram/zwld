@@ -35,7 +35,7 @@ const usage =
 ;
 
 pub fn main() !void {
-    defer if (std.builtin.mode == .Debug) {
+    defer if (@import("builtin").mode == .Debug) {
         _ = gpa_allocator.deinit();
     };
 

@@ -255,6 +255,7 @@ fn Parser(comptime ReaderType: type) type {
                                 .table => .{ .table = .{
                                     .reftype = try readEnum(wasm.RefType, reader),
                                     .limits = try readLimits(reader),
+                                    .table_idx = @intCast(u32, index),
                                 } },
                             };
 
@@ -268,17 +269,20 @@ fn Parser(comptime ReaderType: type) type {
                     },
                     .function => {
                         for (try readVec(&self.object.functions, reader, gpa)) |*func, index| {
-                            func.type_idx = try readLeb(u32, reader);
-                            func.func_idx = @intCast(u32, index);
-                            func.func_type = &self.object.types[func.type_idx];
+                            func.* = .{
+                                .type_idx = try readLeb(u32, reader),
+                                .func_idx = @intCast(u32, index),
+                                .func_type = &self.object.types[func.type_idx],
+                            };
                         }
                         try assertEnd(reader);
                     },
                     .table => {
-                        for (try readVec(&self.object.tables, reader, gpa)) |*table| {
+                        for (try readVec(&self.object.tables, reader, gpa)) |*table, index| {
                             table.* = .{
                                 .reftype = try readEnum(wasm.RefType, reader),
                                 .limits = try readLimits(reader),
+                                .table_idx = @intCast(u32, index),
                             };
                         }
                         try assertEnd(reader);

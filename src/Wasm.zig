@@ -6,6 +6,7 @@ const Atom = @import("Atom.zig");
 const Object = @import("Object.zig");
 const wasm = @import("data.zig");
 const Symbol = @import("Symbol.zig");
+const sections = @import("sections.zig");
 
 const leb = std.leb;
 const fs = std.fs;
@@ -24,7 +25,7 @@ global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
-types: std.ArrayListUnmanaged(wasm.FuncType) = .{},
+types: sections.Types = .{},
 /// Output import section
 imports: std.ArrayListUnmanaged(wasm.Import) = .{},
 /// Output function section
@@ -195,7 +196,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.setupLinkerSymbols(gpa);
     try self.setupMemory(gpa);
     try self.reindex(gpa);
-    try self.setupTypes(gpa);
+    try self.mergeTypes(gpa);
     try self.setupExports(gpa);
     try self.relocateCode(gpa);
     try self.relocateData(gpa);
@@ -359,29 +360,15 @@ fn reindex(self: *Wasm, gpa: *Allocator) !void {
     }
 }
 
-/// Checks if any type (read: function signature) already exists within
-/// the type section. When it does exist, it will return its index.
-/// Otherwise, returns `null`.
-fn findType(self: *Wasm, wasm_type: wasm.FuncType) ?usize {
-    return for (self.types.items) |ty, index| {
-        if (std.mem.eql(wasm.ValueType, ty.params, wasm_type.params) and
-            std.mem.eql(wasm.ValueType, ty.returns, wasm_type.returns))
-        {
-            return index;
-        }
-    } else null;
-}
-
-fn setupTypes(self: *Wasm, gpa: *Allocator) !void {
+fn mergeTypes(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merging types", .{});
     for (self.objects.items) |object| {
         for (object.types) |wasm_type| {
-            if (self.findType(wasm_type) == null) {
-                try self.types.append(gpa, wasm_type);
-            }
+            // ignore the returned index
+            _ = try self.types.append(gpa, wasm_type);
         }
     }
-    log.debug("Merged ({d}) types from object files", .{self.types.items.len});
+    log.debug("Merged ({d}) types from object files", .{self.types.count()});
 
     log.debug("Building types from import symbols", .{});
     for (self.imported_symbols.items) |symbol_with_loc| {
@@ -389,22 +376,19 @@ fn setupTypes(self: *Wasm, gpa: *Allocator) !void {
         const symbol = object.symtable[symbol_with_loc.sym_index];
         if (symbol.kind == .function) {
             log.debug("Adding type from function '{s}'", .{symbol.name});
-            if (self.findType(object.types[symbol.index().?]) == null) {
-                try self.types.append(gpa, object.types[symbol.index().?]);
-            }
+            // ignore the returned index. type will only be appended if it does
+            // not exist yet.
+            _ = try self.types.append(gpa, object.types[symbol.kind.function.func.type_idx]);
         }
     }
 
     log.debug("Building types from functions", .{});
     for (self.functions.items) |*func| {
-        if (self.findType(func.func_type.*)) |index| {
-            func.type_idx = @intCast(u32, index);
-        } else {
-            func.type_idx = @intCast(u32, self.types.items.len);
-            try self.types.append(gpa, func.func_type.*);
-        }
+        const index = try self.types.append(gpa, func.func_type.*);
+        func.type_idx = index;
+        func.func_type = self.types.get(index);
     }
-    log.debug("Completed building types. Total count: ({d})", .{self.types.items.len});
+    log.debug("Completed building types. Total count: ({d})", .{self.types.count()});
 }
 
 fn setupExports(self: *Wasm, gpa: *Allocator) !void {
