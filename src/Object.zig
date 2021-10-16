@@ -686,3 +686,101 @@ fn assertEnd(reader: anytype) !void {
     if (len != 0) return error.MalformedSection;
     if (reader.context.bytes_left != 0) return error.MalformedSection;
 }
+
+/// Parses an object file into atoms, for code and data sections
+pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bin: *Wasm) !void {
+    log.debug("Parsing data section into atoms", .{});
+    var symbols_per_segment = std.AutoHashMap(u32, std.ArrayList(u32)).init(gpa);
+    defer symbols_per_segment.deinit();
+
+    for (self.data.segments) |_, index| {
+        try symbols_per_segment.putNoClobber(@intCast(u32, index), std.ArrayList(u32).init(gpa));
+    }
+
+    for (self.symtable) |symbol, symbol_index| {
+        switch (symbol.kind) {
+            .data => |data| {
+                const index = data.index orelse continue;
+                const syms = try symbols_per_segment.getPtr(index).?; // symbols cannot point to non-existing segment
+                try syms.append(@intCast(u32, symbol_index));
+            },
+            else => continue,
+        }
+    }
+
+    for (self.data.segments) |segment, segment_index| {
+        const segment_meta = self.segment_info[segment_index];
+        log.debug("Parsing segment '{s}'", .{segment_meta.name});
+
+        const final_segment_index = try wasm_bin.getMatchingSegment(gpa, object_index, @intCast(u32, segment_index));
+
+        const atom = try Atom.create(gpa);
+        errdefer atom.deinit(gpa);
+
+        try wasm_bin.managed_atoms.append(gpa, atom);
+        atom.file = object_index;
+        atom.size = @intCast(u32, segment.data.len);
+        atom.alignment = @intCast(u32, segment_meta.alignment);
+
+        const symbol_list = symbols_per_segment.get(@intCast(u32, segment_index));
+        for (symbol_list) |symbol_index| {
+            const symbol = self.symtable[symbol_index].kind.data;
+            if (symbol.offset.? > 0) {
+                try atom.contained.append(gpa, .{
+                    .local_sym_index = symbol_index,
+                    .offset = symbol.offset.?,
+                });
+            } else {
+                try atom.aliases.append(gpa, symbol_index);
+            }
+        }
+
+        const relocations: []const wasm.Relocation = self.relocations.get(self.data.index) orelse &{};
+        for (relocations) |relocation| {
+            if (isInbetween(segment.seg_offset, atom.size, relocation.offset)) {
+                try atom.relocs.append(gpa, relocation);
+            }
+        }
+
+        std.sort.sort(u32, atom.aliases.items, wasm_bin.objects.items[object_index], sort);
+        atom.sym_index = atom.aliases.swapRemove(0); // alias should never be empty
+        try atom.code.appendSlice(segment.data);
+
+        const final_segment: Wasm.OutputSegment = &wasm_bin.data.entries.items(.value)[final_segment_index];
+        final_segment.alignment = std.math.max(final_segment.alignment, atom.alignment);
+        final_segment.size = std.mem.alignForwardGeneric(
+            u32,
+            std.mem.alignForwardGeneric(u32, final_segment.size, atom.alignment) + atom.size,
+            final_segment.alignment,
+        );
+
+        if (wasm_bin.atoms.getPtr(final_segment_index)) |last| {
+            last.*.next = atom;
+            atom.prev = last.*;
+            last.* = atom;
+        } else {
+            try wasm_bin.atoms.putNoClobber(gpa, final_segment_index, atom);
+        }
+    }
+}
+
+/// Compares 2 symbols and returns true when the lhs symbol
+/// has a higher seniority than rhs.
+fn sort(object: Object, lhs: u32, rhs: u32) bool {
+    const lhs_sym = object.symtable[lhs];
+    const rhs_sym = object.symtable[rhs];
+
+    const lhs_binding = lhs_sym.flags & @enumToInt(Symbol.Flag.WASM_SYM_BINDING_MASK);
+    const rhs_binding = rhs_sym.flags & @enumToInt(Symbol.Flag.WASM_SYM_BINDING_MASK);
+
+    if (lhs_binding == rhs_binding) return false;
+    if (lhs_sym.isGlobal()) return true;
+    if (lhs_sym.isWeak() and rhs_sym.isLocal()) return true;
+    return false;
+}
+
+/// Verifies if a given value is in between a minimum -and maximum value.
+/// The maxmimum value is calculated using the length, both start and end are inclusive.
+inline fn isInbetween(min: u32, length: u32, value: u32) bool {
+    return value >= min and value <= min + length;
+}

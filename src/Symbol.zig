@@ -54,13 +54,15 @@ pub const Flag = enum(u32) {
     /// When linking multiple modules defining the same symbol, all weak definitions are discarded
     /// in favourite of the strong definition. When no strong definition exists, all weak but one definiton is discarded.
     /// If multiple definitions remain, we get an error: symbol collision.
-    WASM_SYM_BINDING_WEAK = 1,
+    WASM_SYM_BINDING_WEAK = 0x1,
     /// Indicates a local, non-exported, non-module-linked symbol.
     /// The names of local symbols are not required to be unique, unlike non-local symbols.
-    WASM_SYM_BINDING_LOCAL = 2,
+    WASM_SYM_BINDING_LOCAL = 0x2,
+    /// Represents the binding of a symbol, indicating if it's local or not, and weak or not.
+    WASM_SYM_BINDING_MASK = 0x3,
     /// Indicates a hidden symbol. Hidden symbols will not be exported to the link result, but may
     /// link to other modules.
-    WASM_SYM_VISIBILITY_HIDDEN = 4,
+    WASM_SYM_VISIBILITY_HIDDEN = 0x4,
     /// Indicates an undefined symbol. For non-data symbols, this must match whether the symbol is
     /// an import or is defined. For data symbols however, determines whether a segment is specified.
     WASM_SYM_UNDEFINED = 0x10,
@@ -72,6 +74,8 @@ pub const Flag = enum(u32) {
     WASM_SYM_EXPLICIT_NAME = 0x40,
     /// Indicates the symbol is to be included in the linker output, regardless of whether it is used or has any references to it.
     WASM_SYM_NO_STRIP = 0x80,
+    /// Indicates a symbol is TLS
+    WASM_SYM_TLS = 0x100,
 };
 
 /// Attempts to unwrap a symbol based on a given expected `Kind`.

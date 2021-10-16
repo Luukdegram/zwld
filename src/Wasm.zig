@@ -22,6 +22,10 @@ options: Options,
 objects: std.ArrayListUnmanaged(Object) = .{},
 /// A map of global names to their symbol location in an object file
 global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+/// Contains all atoms that have been created, used to clean up
+managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
+/// Maps atoms to their segment index
+atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
@@ -56,7 +60,7 @@ pub const SymbolWithLoc = struct {
     file: u16,
 };
 
-const OutputSegment = struct {
+pub const OutputSegment = struct {
     /// Index of linear memory
     memory_index: u32,
     /// Where the segment's data within the entire data section starts
@@ -120,6 +124,11 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.data.items) |data| {
         gpa.free(data.data);
     }
+    for (self.managed_atoms.items) |atom| {
+        atom.deinit(gpa);
+    }
+    self.managed_atoms.deinit(gpa);
+    self.atoms.deinit(gpa);
 
     self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
@@ -575,4 +584,26 @@ fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
             .max = null,
         },
     });
+}
+
+/// From a given object's index and the index of the segment, returns the corresponding
+/// index of the segment within the final data section. When the segment does not yet
+/// exist, a new one will be initialized and appended. The new index will be returned in that case.
+pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, segment_index: u32) u32 {
+    const object = self.objects.items[object_index];
+    const segment_name = object.data.segment_info[segment_index].outputName();
+
+    const result = try self.data.getOrPut(gpa, segment_name);
+    if (!result.found_existing) {
+        const index = @intCast(u32, self.data.count());
+        result.value_ptr.* = .{
+            .memory_index = 0,
+            .offset = .{ .i32_const = 0 },
+            .size = 0,
+            .segment_index = index,
+            .data = undefined,
+            .alignment = 0,
+        };
+        return segment_index;
+    } else return result.value_ptr.*.segment_index;
 }

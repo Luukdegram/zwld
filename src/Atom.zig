@@ -23,6 +23,8 @@ size: u32,
 relocs: std.ArrayListUnmanaged(wasm.Relocation) = .{},
 /// Contains the binary data of an atom, which can be non-relocated
 code: std.ArrayListUnmanaged(u8) = .{},
+/// For code this is 0, for data this is set to the highest alignment
+alignment: u32,
 
 /// Next atom in relation to this atom.
 /// When null, this atom is the last atom
@@ -37,7 +39,7 @@ pub const SymbolAtOffset = struct {
 };
 
 /// Creates a new Atom with default fields
-pub fn createEmpty(gpa: *Allocator) !*Atom {
+pub fn create(gpa: *Allocator) !*Atom {
     const atom = try gpa.create(Atom);
     atom.* = .{
         .sym_index = 0,
