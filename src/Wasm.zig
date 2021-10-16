@@ -31,28 +31,22 @@ imports: sections.Imports = .{},
 /// Output function section
 functions: sections.Functions = .{},
 /// Output table section
-tables: std.ArrayListUnmanaged(wasm.Table) = .{},
+tables: sections.Tables = .{},
 /// Output memory section
 memories: std.ArrayListUnmanaged(wasm.Memory) = .{},
 /// Output global section
-globals: std.ArrayListUnmanaged(wasm.Global) = .{},
+globals: sections.Globals = .{},
 /// Output export section
-exports: std.ArrayListUnmanaged(wasm.Export) = .{},
+exports: sections.Exports = .{},
 /// Output element section
 elements: std.ArrayListUnmanaged(wasm.Element) = .{},
 /// Output code section
 code: std.ArrayListUnmanaged([]u8) = .{},
-/// Output data section
-data: std.ArrayListUnmanaged(wasm.Data) = .{},
-
-// EXPORTS //
-/// A list of symbols which are to be exported
-exported_symbols: std.ArrayListUnmanaged(*Symbol) = .{},
+/// Output data section, keyed by the segment name
+data: std.StringArrayHashMapUnmanaged(OutputSegment) = .{},
 
 /// A list of indirect function calls used for the indirect table
 indirect_functions: std.ArrayListUnmanaged(u32) = .{},
-
-const max_load = std.hash_map.default_max_load_percentage;
 
 // a global variable that defines the stack pointer of the program
 var stack_symbol: ?Symbol = null;
@@ -60,6 +54,21 @@ var stack_symbol: ?Symbol = null;
 pub const SymbolWithLoc = struct {
     sym_index: u32,
     file: u16,
+};
+
+const OutputSegment = struct {
+    /// Index of linear memory
+    memory_index: u32,
+    /// Where the segment's data within the entire data section starts
+    offset: wasm.InitExpression,
+    /// The actual data living in this segment
+    data: [*]u8,
+    /// Segment's alignment
+    alignment: u32,
+    /// The size of the segment
+    size: u32,
+    /// The index of this segment into the data section
+    segment_index: u32,
 };
 
 /// Options to pass to our linker which affects
@@ -112,7 +121,6 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
         gpa.free(data.data);
     }
 
-    self.exported_symbols.deinit(gpa);
     self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
     self.functions.deinit(gpa);
@@ -154,7 +162,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
 
     try self.setupLinkerSymbols(gpa);
     try self.setupMemory(gpa);
-    try self.reindex(gpa);
+    try self.mergeSections(gpa);
     try self.mergeTypes(gpa);
     try self.setupExports(gpa);
     try self.relocateCode(gpa);
@@ -221,7 +229,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
 }
 
 /// Calculates the new indexes for symbols and their respective symbols
-fn reindex(self: *Wasm, gpa: *Allocator) !void {
+fn mergeSections(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merging functions", .{});
     for (self.objects.items) |object| {
         for (object.functions) |*func| {
@@ -235,35 +243,21 @@ fn reindex(self: *Wasm, gpa: *Allocator) !void {
         log.debug("Merging globals", .{});
         for (self.objects.items) |object| {
             for (object.globals) |*global| {
-                global.global_idx = @intCast(u32, self.imports.globalCount() + self.globals.items.len);
-                try self.globals.append(gpa, global.*);
+                try self.globals.append(gpa, self.imports.globalCount(), global);
             }
         }
 
-        var global_index = @intCast(u32, self.imports.globalCount());
-        for (self.globals.items) |*global| {
-            global.global_idx = global_index;
-            global_index += 1;
-        }
-        log.debug("Merged ({d}) globals", .{self.globals.items.len});
+        log.debug("Merged ({d}) globals", .{self.globals.count()});
     }
 
     // merge tables
     {
         log.debug("TODO: Merge tables", .{});
-        // for (self.objects.items) |object| {
-        //     for (object.tables) |*table| {
-        //         table.index = @intCast(u32, self.imported_tables.count() + self.tables.items.len);
-        //         try self.tables.append(gpa, table.*);
-        //     }
-        // }
-
-        // var table_index: u32 = @intCast(u32, self.imported_tables.count());
-        // for (self.tables.items) |*table| {
-        //     _ = table;
-        //     table.index = table_index;
-        //     table_index += 1;
-        // }
+        for (self.objects.items) |object| {
+            for (object.tables) |*table| {
+                try self.tables.append(gpa, self.imports.tableCount(), table);
+            }
+        }
     }
 }
 
@@ -328,9 +322,9 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
             symbol.name, name,
         });
         try self.exports.append(gpa, exported);
-        try self.exported_symbols.append(gpa, entry.symbol);
+        try self.exports.appendSymbol(gpa, entry.symbol);
     }
-    log.debug("Completed building exports. Total count: ({d})", .{self.exports.items.len});
+    log.debug("Completed building exports. Total count: ({d})", .{self.exports.count()});
 }
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
@@ -346,18 +340,19 @@ fn createGlobal(
     mutability: enum { mutable, immutable },
     valtype: wasm.ValueType,
 ) !Symbol {
-    var global: wasm.Global = .{
-        .valtype = valtype,
-        .mutable = mutability == .mutable,
-        .init = .{ .i32_const = 0 },
-        .global_idx = @intCast(u32, self.globals.items.len),
-    };
-    try self.globals.append(gpa, global);
+    const global = try self.globals.create(
+        gpa,
+        if (mutability == .mutable) .mutable else .immutable,
+        valtype,
+    );
 
     var sym: Symbol = .{
         .flags = 0,
         .name = name,
-        .kind = .{ .global = .{ .index = global.global_idx, .global = &self.globals.items[global.global_idx] } },
+        .kind = .{ .global = .{
+            .index = global.global_idx,
+            .global = global,
+        } },
     };
     return sym;
 }
@@ -570,7 +565,7 @@ fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
     memory_ptr += stack_size;
 
     // set stack value on global
-    const global: *wasm.Global = &self.globals.items[stack_symbol.?.index().?];
+    const global: *wasm.Global = stack_symbol.?.kind.global.global;
     global.init = .{ .i32_const = @intCast(i32, @bitCast(i64, memory_ptr)) };
 
     // setup memory TODO: Calculate based on data segments and configered pages by user

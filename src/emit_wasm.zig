@@ -48,13 +48,13 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .function, wasm.functions.count());
     }
-    if (wasm.tables.items.len != 0) {
-        log.debug("Writing 'Tables' section ({d})", .{wasm.tables.items.len});
+    if (wasm.tables.count() != 0) {
+        log.debug("Writing 'Tables' section ({d})", .{wasm.tables.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.tables.items) |table| {
+        for (wasm.tables.items.items) |table| {
             try emitTable(table, writer);
         }
-        try emitSectionHeader(file, offset, .table, wasm.tables.items.len);
+        try emitSectionHeader(file, offset, .table, wasm.tables.count());
     }
     if (wasm.memories.items.len != 0) {
         log.debug("Writing 'Memories' section ({d})", .{wasm.memories.items.len});
@@ -64,21 +64,21 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .memory, wasm.memories.items.len);
     }
-    if (wasm.globals.items.len != 0) {
-        log.debug("Writing 'Globals' section ({d})", .{wasm.globals.items.len});
+    if (wasm.globals.count() != 0) {
+        log.debug("Writing 'Globals' section ({d})", .{wasm.globals.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.globals.items) |global| {
+        for (wasm.globals.items.items) |global| {
             try emitGlobal(global, writer);
         }
-        try emitSectionHeader(file, offset, .global, wasm.globals.items.len);
+        try emitSectionHeader(file, offset, .global, wasm.globals.count());
     }
-    if (wasm.exports.items.len != 0) {
-        log.debug("Writing 'Exports' section ({d})", .{wasm.exports.items.len});
+    if (wasm.exports.count() != 0) {
+        log.debug("Writing 'Exports' section ({d})", .{wasm.exports.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.exports.items) |exported| {
+        for (wasm.exports.items.items) |exported| {
             try emitExport(exported, writer);
         }
-        try emitSectionHeader(file, offset, .@"export", wasm.exports.items.len);
+        try emitSectionHeader(file, offset, .@"export", wasm.exports.count());
     }
     log.debug("TODO: Start section", .{});
     if (wasm.elements.items.len != 0) {

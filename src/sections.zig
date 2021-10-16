@@ -177,7 +177,7 @@ pub const Globals = struct {
     /// current count of globals and the given `offset`.
     pub fn append(self: *Globals, gpa: *Allocator, offset: u32, global: *wasm.Global) !void {
         global.global_idx = offset + self.count();
-        try self.globals.append(gpa, global.*);
+        try self.items.append(gpa, global.*);
     }
 
     /// Returns the total amount of globals of the global section
@@ -207,6 +207,11 @@ pub const Globals = struct {
     /// set to 2, rather than 0.
     pub fn setIndexes(self: *Globals, offset: u32) void {
         setIndex("global_idx", self.items.items, offset);
+    }
+
+    pub fn deinit(self: *Globals, gpa: *Allocator) void {
+        self.items.deinit(gpa);
+        self.* = undefined;
     }
 };
 
@@ -287,6 +292,11 @@ pub const Tables = struct {
     pub fn setIndexes(self: *Tables, offset: u32) void {
         setIndex("table_idx", self.items.items, offset);
     }
+
+    pub fn deinit(self: *Tables, gpa: *Allocator) void {
+        self.items.deinit(gpa);
+        self.* = undefined;
+    }
 };
 
 /// Represents the exports section, built from explicit exports
@@ -306,8 +316,18 @@ pub const Exports = struct {
         try self.items.append(gpa, exp);
     }
 
+    pub fn appendSymbol(self: *Exports, gpa: *Allocator, symbol: *Symbol) !void {
+        try self.symbols.append(gpa, symbol);
+    }
+
     /// Returns the amount of entries in the export section
     pub fn count(self: Exports) u32 {
         return @intCast(u32, self.items.items.len);
+    }
+
+    pub fn deinit(self: *Exports, gpa: *Allocator) void {
+        self.items.deinit(gpa);
+        self.symbols.deinit(gpa);
+        self.* = undefined;
     }
 };
