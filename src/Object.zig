@@ -581,6 +581,7 @@ fn Parser(comptime ReaderType: type) type {
                     const is_undefined = symbol.isUndefined();
                     if (is_undefined) {
                         maybe_import = self.object.findImport(kind.externalType(), index);
+                        symbol.module_name = maybe_import.?.module_name;
                     }
                     const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
                     if (!(is_undefined and !explicit_name)) {

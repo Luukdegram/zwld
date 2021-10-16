@@ -22,18 +22,23 @@ pub const Functions = struct {
     /// Holds the list of function type indexes.
     /// The list is built from merging all defined functions into this single list.
     /// Once appended, it becomes immutable and should not be mutated outside this list.
-    items: std.ArrayList(wasm.Func) = .{},
+    items: std.ArrayListUnmanaged(wasm.Func) = .{},
 
     /// Adds a new function to the section while also setting the function index
     /// of the `Func` itself.
     pub fn append(self: *Functions, gpa: *Allocator, offset: u32, func: *wasm.Func) !void {
         func.func_idx = offset + self.count();
-        try self.indexes.append(gpa, func.*);
+        try self.items.append(gpa, func.*);
     }
 
     /// Returns the count of entires within the function section
     pub fn count(self: *Functions) u32 {
-        return @intCast(u32, self.indexes.items.len);
+        return @intCast(u32, self.items.items.len);
+    }
+
+    pub fn deinit(self: *Functions, gpa: *Allocator) void {
+        self.items.deinit(gpa);
+        self.* = undefined;
     }
 };
 
@@ -83,10 +88,10 @@ pub const Imports = struct {
     /// to their respective import list (such as imported_functions)
     ///
     /// NOTE: The given symbol must reside within the given `Object`.
-    pub fn appendSymbol(self: *Imports, gpa: *Allocator, object: Object, symbol: *Symbol) !void {
-        const import = object.imports[symbol.index().?]; // Undefined data symbols cannot be imported
-        const module_name = import.module_name;
-        const import_name = import.name;
+    pub fn appendSymbol(self: *Imports, gpa: *Allocator, symbol: *Symbol) !void {
+        const module_name = symbol.module_name.?;
+        const import_name = symbol.name;
+
         switch (symbol.kind) {
             .function => |*func| {
                 const ret = try self.imported_functions.getOrPut(gpa, .{
@@ -97,7 +102,7 @@ pub const Imports = struct {
                     try self.imported_symbols.append(gpa, symbol);
                     ret.value_ptr.* = @intCast(u32, self.imported_functions.count() - 1);
                 }
-                func.func.?.func_idx = ret.value_ptr.*;
+                func.func.func_idx = ret.value_ptr.*;
                 log.debug("Imported function '{s}' at index ({d})", .{ import_name, func.index });
             },
             .global => |*global| {
@@ -130,17 +135,35 @@ pub const Imports = struct {
 
     /// Returns the count of functions that have been imported (so far)
     pub fn functionCount(self: Imports) u32 {
-        return @intCast(u32, self.imported_functions.items.len);
+        return @intCast(u32, self.imported_functions.count());
     }
 
     /// Returns the count of tables that have been imported (so far)
     pub fn tableCount(self: Imports) u32 {
-        return @intCast(u32, self.imported_tables.items.len);
+        return @intCast(u32, self.imported_tables.count());
     }
 
     /// Returns the count of globals that have been imported (so far)
     pub fn globalCount(self: Imports) u32 {
-        return @intCast(u32, self.imported_globals.items.len);
+        return @intCast(u32, self.imported_globals.count());
+    }
+
+    pub fn deinit(self: *Imports, gpa: *Allocator) void {
+        self.imported_functions.deinit(gpa);
+        self.imported_globals.deinit(gpa);
+        self.imported_tables.deinit(gpa);
+        self.imported_symbols.deinit(gpa);
+        self.* = undefined;
+    }
+
+    /// Returns a slice to pointers to symbols that have been imported
+    pub fn symbols(self: Imports) []const *Symbol {
+        return self.imported_symbols.items;
+    }
+
+    /// Returns the count of symbols which have been imported
+    pub fn symbolCount(self: Imports) u32 {
+        return @intCast(u32, self.imported_symbols.items.len);
     }
 };
 

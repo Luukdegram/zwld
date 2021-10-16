@@ -27,9 +27,9 @@ global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 /// Output function signature types
 types: sections.Types = .{},
 /// Output import section
-imports: std.ArrayListUnmanaged(wasm.Import) = .{},
+imports: sections.Imports = .{},
 /// Output function section
-functions: std.ArrayListUnmanaged(wasm.Func) = .{},
+functions: sections.Functions = .{},
 /// Output table section
 tables: std.ArrayListUnmanaged(wasm.Table) = .{},
 /// Output memory section
@@ -45,21 +45,6 @@ code: std.ArrayListUnmanaged([]u8) = .{},
 /// Output data section
 data: std.ArrayListUnmanaged(wasm.Data) = .{},
 
-// IMPORTS //
-/// Table where the key is represented by an import.
-/// Each entry represents an imported function, and maps to the index within this map
-imported_functions: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
-/// Table where the key is represented by an import.
-/// Each entry represents an imported global from the host environment and maps to the index
-/// within this map.
-imported_globals: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
-/// Table where the key is represented by an import.
-/// Each entry represents an imported table from the host environment and maps to the index
-/// within this map.
-imported_tables: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
-/// A list of symbols that are imported from a host environment.
-imported_symbols: std.ArrayListUnmanaged(SymbolWithLoc) = .{},
-
 // EXPORTS //
 /// A list of symbols which are to be exported
 exported_symbols: std.ArrayListUnmanaged(*Symbol) = .{},
@@ -71,30 +56,6 @@ const max_load = std.hash_map.default_max_load_percentage;
 
 // a global variable that defines the stack pointer of the program
 var stack_symbol: ?Symbol = null;
-
-const ImportKey = struct {
-    module_name: []const u8,
-    name: []const u8,
-
-    const Ctx = struct {
-        pub fn hash(ctx: Ctx, key: ImportKey) u64 {
-            _ = ctx;
-            const hashFunc = std.hash.autoHash;
-            var hasher = std.hash.Wyhash.init(0);
-            hashFunc(&hasher, key.module_name.len);
-            hashFunc(&hasher, key.module_name.ptr);
-            hashFunc(&hasher, key.name.len);
-            hashFunc(&hasher, key.name.ptr);
-            return hasher.final();
-        }
-
-        pub fn eql(ctx: Ctx, lhs: ImportKey, rhs: ImportKey) bool {
-            _ = ctx;
-            return std.mem.eql(u8, lhs.name, rhs.name) and
-                std.mem.eql(u8, lhs.module_name, rhs.module_name);
-        }
-    };
-};
 
 pub const SymbolWithLoc = struct {
     sym_index: u32,
@@ -150,15 +111,13 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.data.items) |data| {
         gpa.free(data.data);
     }
-    self.imported_functions.deinit(gpa);
-    self.imported_globals.deinit(gpa);
-    self.imported_tables.deinit(gpa);
-    self.imported_symbols.deinit(gpa);
+
     self.exported_symbols.deinit(gpa);
     self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
     self.functions.deinit(gpa);
     self.types.deinit(gpa);
+    self.imports.deinit(gpa);
     self.globals.deinit(gpa);
     self.exports.deinit(gpa);
     self.tables.deinit(gpa);
@@ -209,13 +168,13 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
 
     log.debug("resolving symbols in {s}", .{object.name});
 
-    for (object.symtable) |symbol, i| {
+    for (object.symtable) |*symbol, i| {
         const sym_idx = @intCast(u32, i);
 
         // Check if they should be imported, if so: add them to the import section.
         if (symbol.requiresImport()) {
             log.debug("Symbol '{s}' should be imported", .{symbol.name});
-            try self.appendImportSymbol(gpa, object_index, sym_idx);
+            try self.imports.appendSymbol(gpa, symbol);
         }
 
         if (symbol.isWeak() or symbol.isGlobal()) {
@@ -261,79 +220,27 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
     }
 }
 
-/// Checks if a symbol is already imported or not. If not, will be appended as well as appended
-/// to a typed list of imports.
-fn appendImportSymbol(self: *Wasm, gpa: *Allocator, object_id: u16, symbol_id: u32) !void {
-    const object: *Object = &self.objects.items[object_id];
-    const symbol = &object.symtable[symbol_id];
-    const import = object.imports[symbol.index().?]; // Programmer error: Undefined data symbols are not imported.
-    const module_name = import.module_name;
-    const import_name = import.name;
-    const symbol_with_loc: SymbolWithLoc = .{ .file = object_id, .sym_index = symbol_id };
-
-    switch (symbol.kind) {
-        .function => |*func| {
-            const ret = try self.imported_functions.getOrPut(gpa, .{
-                .module_name = module_name,
-                .name = import_name,
-            });
-            if (!ret.found_existing) {
-                try self.imported_symbols.append(gpa, symbol_with_loc);
-                ret.value_ptr.* = @intCast(u32, self.imported_functions.count() - 1);
-            }
-            func.index = ret.value_ptr.*;
-            log.debug("Imported function '{s}' at index ({d})", .{ import_name, func.index });
-        },
-        .global => |*global| {
-            const ret = try self.imported_globals.getOrPut(gpa, .{
-                .module_name = module_name,
-                .name = import_name,
-            });
-            if (!ret.found_existing) {
-                try self.imported_symbols.append(gpa, symbol_with_loc);
-                ret.value_ptr.* = @intCast(u32, self.imported_globals.count() - 1);
-            }
-            global.index = ret.value_ptr.*;
-            log.debug("Imported global '{s}' at index ({d})", .{ import_name, global.index });
-        },
-        .table => |*table| {
-            const ret = try self.imported_tables.getOrPut(gpa, .{
-                .module_name = module_name,
-                .name = import_name,
-            });
-            if (!ret.found_existing) {
-                try self.imported_symbols.append(gpa, symbol_with_loc);
-                ret.value_ptr.* = @intCast(u32, self.imported_tables.count() - 1);
-            }
-            table.index = ret.value_ptr.*;
-            log.debug("Imported table '{s}' at index ({d})", .{ import_name, table.index });
-        },
-        else => unreachable, // programmer error: Given symbol cannot be imported
-    }
-}
-
 /// Calculates the new indexes for symbols and their respective symbols
 fn reindex(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merging functions", .{});
     for (self.objects.items) |object| {
         for (object.functions) |*func| {
-            func.func_idx = @intCast(u32, self.imported_functions.count() + self.functions.items.len);
-            try self.functions.append(gpa, func.*);
+            try self.functions.append(gpa, self.imports.functionCount(), func);
         }
     }
-    log.debug("Merged ({d}) functions", .{self.functions.items.len});
+    log.debug("Merged ({d}) functions", .{self.functions.count()});
 
     // merge globals
     {
         log.debug("Merging globals", .{});
         for (self.objects.items) |object| {
             for (object.globals) |*global| {
-                global.global_idx = @intCast(u32, self.imported_globals.count() + self.globals.items.len);
+                global.global_idx = @intCast(u32, self.imports.globalCount() + self.globals.items.len);
                 try self.globals.append(gpa, global.*);
             }
         }
 
-        var global_index = @intCast(u32, self.imported_globals.count());
+        var global_index = @intCast(u32, self.imports.globalCount());
         for (self.globals.items) |*global| {
             global.global_idx = global_index;
             global_index += 1;
@@ -371,19 +278,17 @@ fn mergeTypes(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merged ({d}) types from object files", .{self.types.count()});
 
     log.debug("Building types from import symbols", .{});
-    for (self.imported_symbols.items) |symbol_with_loc| {
-        const object = self.objects.items[symbol_with_loc.file];
-        const symbol = object.symtable[symbol_with_loc.sym_index];
+    for (self.imports.symbols()) |symbol| {
         if (symbol.kind == .function) {
             log.debug("Adding type from function '{s}'", .{symbol.name});
             // ignore the returned index. type will only be appended if it does
             // not exist yet.
-            _ = try self.types.append(gpa, object.types[symbol.kind.function.func.type_idx]);
+            _ = try self.types.append(gpa, symbol.kind.function.func.func_type.*);
         }
     }
 
     log.debug("Building types from functions", .{});
-    for (self.functions.items) |*func| {
+    for (self.functions.items.items) |*func| {
         const index = try self.types.append(gpa, func.func_type.*);
         func.type_idx = index;
         func.func_type = self.types.get(index);
@@ -392,9 +297,6 @@ fn mergeTypes(self: *Wasm, gpa: *Allocator) !void {
 }
 
 fn setupExports(self: *Wasm, gpa: *Allocator) !void {
-    var global_index = @intCast(u32, self.imported_globals.count() + self.globals.items.len);
-    _ = global_index;
-
     log.debug("Building exports from symbols", .{});
     var symbol_it = SymbolIterator.init(self);
     while (symbol_it.next()) |entry| {
@@ -496,7 +398,7 @@ const SymbolIterator = struct {
 fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merging code sections and performing relocations", .{});
     // Each function must have its own body
-    try self.code.resize(gpa, self.functions.items.len);
+    try self.code.resize(gpa, self.functions.count());
     for (self.objects.items) |object| {
         for (object.code.bodies) |code, body_index| {
             const body_length = @intCast(u32, code.data.len);
@@ -521,8 +423,10 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                         },
                         .R_WASM_GLOBAL_INDEX_LEB => {
                             const index: u32 = if (symbol.isUndefined()) blk: {
-                                const import = object.imports[symbol.index().?];
-                                break :blk self.imported_globals.get(.{ .module_name = import.module_name, .name = import.name }).?;
+                                break :blk self.imports.imported_globals.get(.{
+                                    .module_name = symbol.module_name.?,
+                                    .name = symbol.name,
+                                }).?;
                             } else object.globals[symbol.index().?].global_idx;
                             log.debug("Performing relocation for global symbol '{s}' at offset=0x{x:0>8} body_offset=0x{x:0>8} index=({d})", .{
                                 symbol.name,

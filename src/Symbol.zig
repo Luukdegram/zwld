@@ -10,6 +10,8 @@ const wasm = @import("data.zig");
 flags: u32,
 /// Symbol name, when undefined this will be taken from the import.
 name: []const u8,
+/// When the symbol is an import, this field will be non-null.
+module_name: ?[]const u8 = null,
 /// An union that represents both the type of symbol
 /// as well as the data it holds.
 kind: Kind,
@@ -121,7 +123,7 @@ pub fn getTableIndex(self: *Symbol) ?u32 {
 /// host environment or not
 pub fn requiresImport(self: Symbol) bool {
     if (self.kind == .data) return false;
-    if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
+    // if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
     if (self.isDefined()) return false;
     if (self.isWeak()) return false;
 
@@ -191,6 +193,10 @@ pub fn isGlobal(self: Symbol) bool {
 
 pub fn isHidden(self: Symbol) bool {
     return self.flags & @enumToInt(Flag.WASM_SYM_VISIBILITY_HIDDEN) != 0;
+}
+
+pub fn isNoStrip(self: Symbol) bool {
+    return self.flags & @enumToInt(Flag.WASM_SYM_NO_STRIP) != 0;
 }
 
 pub fn isExported(self: Symbol) bool {

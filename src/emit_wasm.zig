@@ -28,26 +28,25 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .type, wasm.types.count());
     }
-    if (wasm.imports.items.len != 0) {
-        log.debug("Writing 'Imports' section ({d})", .{wasm.imports.items.len + wasm.imported_symbols.items.len});
-        const offset = try reserveSectionHeader(file);
+    // if (wasm.imports.symbolCount() != 0) {
+    //     log.debug("Writing 'Imports' section ({d})", .{wasm.imports.symbolCount()});
+    //     const offset = try reserveSectionHeader(file);
 
-        for (wasm.imported_symbols.items) |sym_with_loc| {
-            try emitImportSymbol(wasm, sym_with_loc);
-        }
+    //     for (wasm.imports.symbols()) |symbol| {
+    //         try emitImportSymbol(symbol.*, writer);
+    //     }
 
-        for (wasm.imports.items) |import_entry| {
-            try emitImport(import_entry, writer);
-        }
-        try emitSectionHeader(file, offset, .import, wasm.imports.items.len);
-    }
-    if (wasm.functions.items.len != 0) {
-        log.debug("Writing 'Functions' section ({d})", .{wasm.functions.items.len});
+    //     // TODO: Also emit GOT symbols and memory if the CLI option was provided
+
+    //     try emitSectionHeader(file, offset, .import, wasm.imports.symbolCount());
+    // }
+    if (wasm.functions.count() != 0) {
+        log.debug("Writing 'Functions' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.functions.items) |func| {
+        for (wasm.functions.items.items) |func| {
             try emitFunction(func, writer);
         }
-        try emitSectionHeader(file, offset, .function, wasm.functions.items.len);
+        try emitSectionHeader(file, offset, .function, wasm.functions.count());
     }
     if (wasm.tables.items.len != 0) {
         log.debug("Writing 'Tables' section ({d})", .{wasm.tables.items.len});
@@ -163,23 +162,21 @@ fn emitType(type_entry: data.FuncType, writer: anytype) !void {
     }
 }
 
-fn emitImportSymbol(wasm: *Wasm, sym_with_loc: Wasm.SymbolWithLoc) !void {
-    const object = wasm.objects.items[sym_with_loc.file];
-    const sym: Symbol = object.symtable[sym_with_loc.sym_index];
+fn emitImportSymbol(symbol: Symbol, writer: anytype) !void {
     var import: data.Import = .{
-        .module_name = object.imports[sym.index().?].module_name,
-        .name = sym.name,
+        .module_name = symbol.module_name.?,
+        .name = symbol.name,
         .kind = undefined,
     };
 
-    switch (sym.kind) {
+    switch (symbol.kind) {
         .function => |func| import.kind = .{ .function = func.func.* },
         .global => |global| import.kind = .{ .global = global.global.* },
         .table => |table| import.kind = .{ .table = table.table.* },
         else => unreachable,
     }
 
-    try emitImport(import, wasm.file.writer());
+    try emitImport(import, writer);
 }
 
 fn emitImport(import_entry: data.Import, writer: anytype) !void {
@@ -199,7 +196,6 @@ fn emitImport(import_entry: data.Import, writer: anytype) !void {
         },
         .memory => |mem| try emitLimits(mem, writer),
     }
-    try leb.writeULEB128(writer, @enumToInt(data.ExternalType.function));
 }
 
 fn emitFunction(func: data.Func, writer: anytype) !void {
