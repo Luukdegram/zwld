@@ -25,7 +25,7 @@ global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 /// Contains all atoms that have been created, used to clean up
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// Maps atoms to their segment index
-atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{},
+atoms: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
@@ -73,6 +73,8 @@ pub const OutputSegment = struct {
     size: u32,
     /// The index of this segment into the data section
     segment_index: u32,
+    /// Offset into the data section
+    section_offset: u32,
 };
 
 /// Options to pass to our linker which affects
@@ -121,8 +123,8 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.global_symbols.keys()) |name| {
         gpa.free(name);
     }
-    for (self.data.items) |data| {
-        gpa.free(data.data);
+    for (self.data.values()) |segment| {
+        gpa.free(segment.data[0..segment.size]);
     }
     for (self.managed_atoms.items) |atom| {
         atom.deinit(gpa);
@@ -168,7 +170,11 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     for (self.objects.items) |_, obj_idx| {
         try self.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
+    for (self.objects.items) |*object, obj_idx| {
+        try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
+    }
 
+    try self.allocateAtoms();
     try self.setupLinkerSymbols(gpa);
     try self.setupMemory(gpa);
     try self.mergeSections(gpa);
@@ -589,21 +595,71 @@ fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
 /// From a given object's index and the index of the segment, returns the corresponding
 /// index of the segment within the final data section. When the segment does not yet
 /// exist, a new one will be initialized and appended. The new index will be returned in that case.
-pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, segment_index: u32) u32 {
+pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, segment_index: u32) !u32 {
     const object = self.objects.items[object_index];
-    const segment_name = object.data.segment_info[segment_index].outputName();
+    const segment_name = object.segment_info[segment_index].outputName();
 
     const result = try self.data.getOrPut(gpa, segment_name);
     if (!result.found_existing) {
         const index = @intCast(u32, self.data.count());
         result.value_ptr.* = .{
+            .alignment = 0,
+            .data = undefined,
             .memory_index = 0,
             .offset = .{ .i32_const = 0 },
-            .size = 0,
+            .section_offset = 0,
             .segment_index = index,
-            .data = undefined,
-            .alignment = 0,
+            .size = 0,
         };
         return segment_index;
     } else return result.value_ptr.*.segment_index;
+}
+
+fn allocateAtoms(self: *Wasm) !void {
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const segment_index = entry.key_ptr.*;
+        const segment: OutputSegment = self.data.values()[segment_index];
+        var atom: *Atom = entry.value_ptr.*.getFirst();
+
+        log.debug("Allocating atoms for segment '{s}'", .{self.data.keys()[segment_index]});
+
+        var offset: u32 = segment.section_offset;
+        while (true) {
+            offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
+
+            const object: *Object = &self.objects.items[atom.file];
+            const symbol = &object.symtable[atom.sym_index].kind.data;
+            symbol.offset = offset;
+            symbol.index = segment_index;
+            symbol.size = atom.size;
+
+            log.debug("Atom '{s}' allocated from 0x{x:8>0} to 0x{x:8>0}", .{
+                object.symtable[atom.sym_index].name,
+                offset,
+                offset + atom.size,
+            });
+
+            // Update aliases to this atom
+            for (atom.aliases.items) |index| {
+                const alias_sym = &object.symtable[index].kind.data;
+                alias_sym.offset = offset;
+                alias_sym.index = segment_index;
+                alias_sym.size = atom.size;
+            }
+
+            // Update the symbol contained within this segment
+            for (atom.contained.items) |sym_at_off| {
+                const contained_sym = &object.symtable[sym_at_off.local_sym_index].kind.data;
+                contained_sym.index = segment_index;
+                contained_sym.offset = offset + sym_at_off.offset;
+            }
+
+            offset += atom.size;
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+    }
 }

@@ -701,7 +701,7 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
         switch (symbol.kind) {
             .data => |data| {
                 const index = data.index orelse continue;
-                const syms = try symbols_per_segment.getPtr(index).?; // symbols cannot point to non-existing segment
+                const syms = symbols_per_segment.getPtr(index).?; // symbols cannot point to non-existing segment
                 try syms.append(@intCast(u32, symbol_index));
             },
             else => continue,
@@ -722,8 +722,8 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
         atom.size = @intCast(u32, segment.data.len);
         atom.alignment = @intCast(u32, segment_meta.alignment);
 
-        const symbol_list = symbols_per_segment.get(@intCast(u32, segment_index));
-        for (symbol_list) |symbol_index| {
+        const symbol_list = symbols_per_segment.get(@intCast(u32, segment_index)).?;
+        for (symbol_list.items) |symbol_index| {
             const symbol = self.symtable[symbol_index].kind.data;
             if (symbol.offset.? > 0) {
                 try atom.contained.append(gpa, .{
@@ -735,7 +735,7 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
             }
         }
 
-        const relocations: []const wasm.Relocation = self.relocations.get(self.data.index) orelse &{};
+        const relocations: []const wasm.Relocation = self.relocations.get(self.data.index) orelse &.{};
         for (relocations) |relocation| {
             if (isInbetween(segment.seg_offset, atom.size, relocation.offset)) {
                 try atom.relocs.append(gpa, relocation);
@@ -744,9 +744,9 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
 
         std.sort.sort(u32, atom.aliases.items, wasm_bin.objects.items[object_index], sort);
         atom.sym_index = atom.aliases.swapRemove(0); // alias should never be empty
-        try atom.code.appendSlice(segment.data);
+        try atom.code.appendSlice(gpa, segment.data);
 
-        const final_segment: Wasm.OutputSegment = &wasm_bin.data.entries.items(.value)[final_segment_index];
+        const final_segment: *Wasm.OutputSegment = &wasm_bin.data.entries.items(.value)[final_segment_index];
         final_segment.alignment = std.math.max(final_segment.alignment, atom.alignment);
         final_segment.size = std.mem.alignForwardGeneric(
             u32,

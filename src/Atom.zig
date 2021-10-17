@@ -42,11 +42,12 @@ pub const SymbolAtOffset = struct {
 pub fn create(gpa: *Allocator) !*Atom {
     const atom = try gpa.create(Atom);
     atom.* = .{
-        .sym_index = 0,
+        .alignment = 0,
         .file = undefined,
-        .size = 0,
-        .prev = null,
         .next = null,
+        .prev = null,
+        .size = 0,
+        .sym_index = 0,
     };
     return atom;
 }
