@@ -3,6 +3,7 @@ const Atom = @This();
 const std = @import("std");
 const wasm = @import("data.zig");
 const Wasm = @import("Wasm.zig");
+const Symbol = @import("Symbol.zig");
 
 const leb = std.leb;
 const log = std.log.scoped(.zwld);
@@ -83,7 +84,7 @@ pub fn getLast(self: *Atom) *Atom {
     return tmp;
 }
 
-pub fn resolveRelocs(self: *Atom, wasm_bin: *Wasm) !void {
+pub fn resolveRelocs(self: *Atom, gpa: *Allocator, wasm_bin: *Wasm) !void {
     const object = wasm_bin.objects.items[self.file];
     const symbol = object.symtable[self.sym_index];
 
@@ -94,8 +95,20 @@ pub fn resolveRelocs(self: *Atom, wasm_bin: *Wasm) !void {
 
     for (self.relocs.items) |reloc| {
         switch (reloc.relocation_type) {
-            .R_WASM_TABLE_INDEX_I32 => {},
+            .R_WASM_TABLE_INDEX_I32 => {
+                const rel_symbol = &object.symtable[reloc.index];
+                if (requiresGOT(rel_symbol.*)) continue;
+                log.debug("Relocating '{s}' ({s})", .{ rel_symbol.name, @tagName(reloc.relocation_type) });
+                try wasm_bin.elements.appendSymbol(gpa, rel_symbol);
+            },
             else => |tag| log.debug("TODO: support relocation type '{s}'", .{@tagName(tag)}),
         }
     }
+}
+
+/// Determines if a given symbol requires access to the global offset table
+fn requiresGOT(symbol: Symbol) bool {
+    if (symbol.isHidden() or symbol.isLocal()) return false;
+    if (symbol.isDefined()) return false;
+    return true;
 }

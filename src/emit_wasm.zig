@@ -81,13 +81,11 @@ pub fn emit(wasm: *Wasm) !void {
         try emitSectionHeader(file, offset, .@"export", wasm.exports.count());
     }
     log.debug("TODO: Start section", .{});
-    if (wasm.elements.items.len != 0) {
-        log.debug("TODO: Element section", .{});
+    if (wasm.elements.mustEmit()) {
+        log.debug("Writing 'Element' section (1)", .{});
         const offset = try reserveSectionHeader(file);
-        for (wasm.elements.items) |element| {
-            try emitElement(element, writer);
-        }
-        try emitSectionHeader(file, offset, .element, wasm.elements.items.len);
+        try emitElement(wasm.elements, writer);
+        try emitSectionHeader(file, offset, .element, 1);
     }
     if (wasm.code.items.len != 0) {
         log.debug("Writing 'Code' section ({d})", .{wasm.code.items.len});
@@ -247,10 +245,23 @@ fn emitExport(exported: data.Export, writer: anytype) !void {
     try leb.writeULEB128(writer, exported.index);
 }
 
-fn emitElement(element: data.Element, writer: anytype) !void {
-    _ = element;
-    _ = writer;
-    // TODO
+fn emitElement(element: @import("sections.zig").Elements, writer: anytype) !void {
+    var flags: u32 = 0;
+    if (Symbol.linker_defined.indirect_function_table) |table| {
+        flags |= 0x2;
+        try leb.writeULEB128(writer, flags);
+        try leb.writeULEB128(writer, table.kind.table.index);
+    }
+    try emitInitExpression(.{ .i32_const = 0 }, writer);
+    if (flags & 0x3 != 0) {
+        try leb.writeULEB128(writer, @as(u8, 0));
+    }
+
+    try leb.writeULEB128(writer, element.functionCount());
+    for (element.indirect_functions.items) |symbol, index| {
+        std.debug.assert(symbol.kind.function.table_index.? == index);
+        try leb.writeULEB128(writer, symbol.kind.function.functionIndex());
+    }
 }
 
 fn emitSegment(segment: Wasm.OutputSegment, writer: anytype) !void {

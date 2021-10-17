@@ -4,6 +4,7 @@ const std = @import("std");
 const Symbol = @import("Symbol.zig");
 const Object = @import("Object.zig");
 const wasm = @import("data.zig");
+const Wasm = @import("Wasm.zig");
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.zwld);
@@ -293,6 +294,32 @@ pub const Tables = struct {
         setIndex("table_idx", self.items.items, offset);
     }
 
+    /// Creates a synthetic symbol for the indirect function table and appends it into the
+    /// table list.
+    pub fn createIndirectFunctionTable(self: *Tables, gpa: *Allocator, wasm_bin: *Wasm) !void {
+        // Only create it if it doesn't exist yet
+        if (Symbol.linker_defined.indirect_function_table != null) {
+            log.debug("Indirect function table already exists, skipping creation...", .{});
+            return;
+        }
+
+        const index = self.count();
+        try self.items.append(.{
+            .limits = .{ .min = 0, .max = null },
+            .reftype = .funcref,
+            .table_idx = index,
+        });
+        var symbol: Symbol = .{
+            .flags = 0, // created defined symbol
+            .name = Symbol.linker_defined.names.indirect_function_table, // __indirect_function_table
+            .kind = .{ .table = .{ .index = index, .table = &self.items.items[index] } },
+        };
+        wasm_bin.synthetic_symbols.append(gpa, symbol);
+        Symbol.linker_defined.indirect_function_table = &wasm_bin.synthetic_symbols.items[wasm_bin.synthetic_symbols.items.len - 1];
+
+        log.debug("Created indirect function table at index {d}", .{index});
+    }
+
     pub fn deinit(self: *Tables, gpa: *Allocator) void {
         self.items.deinit(gpa);
         self.* = undefined;
@@ -328,6 +355,38 @@ pub const Exports = struct {
     pub fn deinit(self: *Exports, gpa: *Allocator) void {
         self.items.deinit(gpa);
         self.symbols.deinit(gpa);
+        self.* = undefined;
+    }
+};
+
+pub const Elements = struct {
+    /// A list of symbols for indirect function calls
+    indirect_functions: std.ArrayListUnmanaged(*Symbol) = .{},
+
+    /// Appends a function symbol to the list of indirect function calls.
+    /// The table index will be set on the symbol, based on the length
+    ///
+    /// Asserts symbol represents a function.
+    pub fn appendSymbol(self: *Elements, gpa: *Allocator, symbol: *Symbol) !void {
+        // Check if symbol is already part of the indirect function table
+        if (symbol.kind.function.table_index != null) {
+            return;
+        }
+        symbol.kind.function.table_index = @intCast(u32, self.indirect_functions.items.len);
+        try self.indirect_functions.append(gpa, symbol);
+    }
+
+    /// Returns true when this section must be written to the binary
+    pub fn mustEmit(self: Elements) bool {
+        return self.indirect_functions.items.len != 0;
+    }
+
+    pub fn functionCount(self: Elements) u32 {
+        return @intCast(u32, self.indirect_functions.items.len);
+    }
+
+    pub fn deinit(self: *Elements, gpa: *Allocator) void {
+        self.indirect_functions.deinit(gpa);
         self.* = undefined;
     }
 };

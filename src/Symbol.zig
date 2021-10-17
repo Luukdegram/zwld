@@ -154,6 +154,11 @@ pub const Function = struct {
     /// When set, this function is an indirect function call
     /// and this index represents its position within the table.
     table_index: ?u32 = null,
+
+    /// Returns the function index within the final binary
+    pub fn functionIndex(self: Function) u32 {
+        return self.func.func_idx;
+    }
 };
 
 pub const Event = struct {
@@ -255,13 +260,13 @@ pub fn format(self: Symbol, comptime fmt: []const u8, options: std.fmt.FormatOpt
 pub const linker_defined = struct {
     /// Represents a synthetic stack pointer,
     /// used by wasm modules to emulate an explicit stack.
-    var stack_pointer: ?*Symbol = null;
+    pub var stack_pointer: ?*Symbol = null;
     /// Initialized when an object file notates the need for one.
-    var indirect_function_table: ?*Symbol = null;
+    pub var indirect_function_table: ?*Symbol = null;
 
     /// Names of the linker defined symbols as known by the wasm tool convention
     pub const names = struct {
-        const stack_pointer = "__stack_pointer";
-        const indirect_function_table = "__indirect_function_table";
+        pub const stack_pointer = "__stack_pointer";
+        pub const indirect_function_table = "__indirect_function_table";
     };
 };

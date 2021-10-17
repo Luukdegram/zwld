@@ -26,6 +26,9 @@ global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// Maps atoms to their segment index
 atoms: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
+/// All symbols created by the linker, rather than through
+/// object files will be inserted in this list to manage them.
+synthetic_symbols: std.ArrayListUnmanaged(Symbol) = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
@@ -43,14 +46,11 @@ globals: sections.Globals = .{},
 /// Output export section
 exports: sections.Exports = .{},
 /// Output element section
-elements: std.ArrayListUnmanaged(wasm.Element) = .{},
+elements: sections.Elements = .{},
 /// Output code section
 code: std.ArrayListUnmanaged([]u8) = .{},
 /// Output data section, keyed by the segment name
 data: std.StringArrayHashMapUnmanaged(OutputSegment) = .{},
-
-/// A list of indirect function calls used for the indirect table
-indirect_functions: std.ArrayListUnmanaged(u32) = .{},
 
 // a global variable that defines the stack pointer of the program
 var stack_symbol: ?Symbol = null;
@@ -140,11 +140,11 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.imports.deinit(gpa);
     self.globals.deinit(gpa);
     self.exports.deinit(gpa);
+    self.elements.deinit(gpa);
     self.tables.deinit(gpa);
     self.code.deinit(gpa);
     self.memories.deinit(gpa);
     self.data.deinit(gpa);
-    self.indirect_functions.deinit(gpa);
     self.file.close();
     self.* = undefined;
 }
@@ -463,111 +463,6 @@ inline fn isInbetween(min: u32, length: u32, value: u32) bool {
     return value >= min and value <= min + length;
 }
 
-const Segment = struct {
-    name: []const u8,
-    alignment: u32,
-    offset: u32,
-    flags: u32,
-    size: u32,
-    index: u32,
-    file: u16,
-};
-
-fn relocateData(self: *Wasm, gpa: *Allocator) !void {
-    log.debug("Merging data sections and performing relocations", .{});
-
-    // map containing all segments, where the name of the segment is its key
-    var segment_map = std.StringArrayHashMap(std.ArrayList(Segment)).init(gpa);
-    defer for (segment_map.values()) |val| {
-        val.deinit();
-    } else segment_map.deinit();
-
-    for (self.objects.items) |object, object_index| {
-        for (object.symtable) |symbol| {
-            if (symbol.isUndefined()) continue;
-            if (symbol.kind != .data) continue;
-            const data_symbol = symbol.kind.data;
-            const segment_info = object.segment_info[data_symbol.index.?];
-
-            log.debug("Merging segment {s}", .{segment_info.name});
-            const result = try segment_map.getOrPut(segment_info.outputName());
-            if (!result.found_existing) {
-                result.value_ptr.* = std.ArrayList(Segment).init(gpa);
-            }
-
-            var segment: Segment = .{
-                .name = segment_info.name,
-                .alignment = segment_info.alignment,
-                .offset = data_symbol.offset.?,
-                .flags = segment_info.flags,
-                .size = data_symbol.size.?,
-                .index = data_symbol.index.?,
-                .file = @intCast(u16, object_index),
-            };
-
-            if (result.value_ptr.*.popOrNull()) |prev| {
-                segment.offset += prev.size;
-                result.value_ptr.*.appendAssumeCapacity(prev);
-            }
-
-            try result.value_ptr.*.append(segment);
-        }
-    }
-
-    var segment_it = segment_map.iterator();
-    var offset: u32 = 0;
-    while (segment_it.next()) |entry| {
-        const segment_list: std.ArrayList(Segment) = entry.value_ptr.*;
-
-        var segment_data = std.ArrayList(u8).init(gpa);
-        defer segment_data.deinit();
-
-        // perform relocations
-        for (segment_list.items) |segment| {
-            const object: Object = self.objects.items[segment.file];
-            const data = object.data.segments[segment.index];
-
-            if (object.relocations.get(object.data.index)) |relocations| {
-                for (relocations) |_rel| {
-                    const rel: wasm.Relocation = _rel;
-
-                    if (!isInbetween(data.seg_offset, @intCast(u32, data.data.len), rel.offset)) {
-                        continue;
-                    }
-
-                    const symbol: *Symbol = &object.symtable[rel.index];
-                    switch (rel.relocation_type) {
-                        .R_WASM_TABLE_INDEX_I32 => {
-                            const index = symbol.kind.function.func.func_idx;
-                            symbol.setTableIndex(@intCast(u32, self.indirect_functions.items.len));
-                            try self.indirect_functions.append(gpa, index);
-
-                            log.debug("Relocation: Created table entry for symbol '{s}' with index {}", .{
-                                symbol.name,
-                                index,
-                            });
-                        },
-                        else => |ty| {
-                            log.debug("TODO: Relocate data for type {}", .{ty});
-                            continue;
-                        },
-                    }
-                }
-            }
-
-            try segment_data.appendSlice(data.data);
-        }
-
-        try self.data.append(gpa, .{
-            .index = 0,
-            .offset = .{ .i32_const = @bitCast(i32, offset) },
-            .data = segment_data.toOwnedSlice(),
-            .seg_offset = 0,
-        });
-        offset += @intCast(u32, segment_data.items.len);
-    }
-}
-
 /// Sets up the memory section of the wasm module, as well as the stack.
 fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Setting up memory layout", .{});
@@ -677,7 +572,7 @@ fn relocateAtoms(self: *Wasm, gpa: *Allocator) !void {
         segment.data = code.ptr;
         while (true) {
             // First perform relocations to rewrite the binary data
-            try atom.resolveRelocs(self);
+            try atom.resolveRelocs(gpa, self);
 
             // Merge the data into the final segment
             const object = self.objects.items[atom.file];
