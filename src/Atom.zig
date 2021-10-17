@@ -23,7 +23,7 @@ size: u32,
 relocs: std.ArrayListUnmanaged(wasm.Relocation) = .{},
 /// Contains the binary data of an atom, which can be non-relocated
 code: std.ArrayListUnmanaged(u8) = .{},
-/// For code this is 0, for data this is set to the highest alignment
+/// For code this is 1, for data this is set to the highest value of all segments
 alignment: u32,
 
 /// Next atom in relation to this atom.
@@ -93,22 +93,9 @@ pub fn resolveRelocs(self: *Atom, wasm_bin: *Wasm) !void {
     });
 
     for (self.relocs.items) |reloc| {
-        if (reloc.relocation_type == .R_WASM_TYPE_INDEX_LEB) {
-            log.debug("TODO: Support type indexed relocations", .{});
-            continue;
+        switch (reloc.relocation_type) {
+            .R_WASM_TABLE_INDEX_I32 => {},
+            else => |tag| log.debug("TODO: support relocation type '{s}'", .{@tagName(tag)}),
         }
-
-        log.debug("{s}: symbol: 0x{x:2>0} target: 0x{x:2>0}", .{
-            @tagName(reloc.relocation_type),
-            reloc.index,
-            symbol.index(),
-        });
-
-        // TODO: Handle relocations by type
-        leb.writeUnsignedFixed(
-            5,
-            self.code.items[reloc.offset..][0..5],
-            self.sym_index,
-        );
     }
 }

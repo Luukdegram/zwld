@@ -99,13 +99,13 @@ pub fn emit(wasm: *Wasm) !void {
         try emitSectionHeader(file, offset, .code, wasm.code.items.len);
     }
 
-    if (wasm.data.items.len != 0) {
-        log.debug("Writing 'Data' section ({d})", .{wasm.data.items.len});
+    if (wasm.data.count() != 0) {
+        log.debug("Writing 'Data' section ({d}", .{wasm.data.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.data.items) |item| {
-            try emitData(item, writer);
+        for (wasm.data.values()) |segment| {
+            try emitSegment(segment, writer);
         }
-        try emitSectionHeader(file, offset, .data, wasm.data.items.len);
+        try emitSectionHeader(file, offset, .data, wasm.data.count());
     }
 }
 
@@ -253,9 +253,9 @@ fn emitElement(element: data.Element, writer: anytype) !void {
     // TODO
 }
 
-fn emitData(segment: data.Data, writer: anytype) !void {
-    try leb.writeULEB128(writer, @as(u32, 0));
+fn emitSegment(segment: Wasm.OutputSegment, writer: anytype) !void {
+    try leb.writeULEB128(writer, segment.memory_index);
     try emitInitExpression(segment.offset, writer);
-    try leb.writeULEB128(writer, @intCast(u32, segment.data.len));
-    try writer.writeAll(segment.data);
+    try leb.writeULEB128(writer, segment.size);
+    try writer.writeAll(segment.data[0..segment.size]);
 }

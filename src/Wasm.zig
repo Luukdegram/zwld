@@ -60,6 +60,7 @@ pub const SymbolWithLoc = struct {
     file: u16,
 };
 
+/// Represents a single segment within the data section
 pub const OutputSegment = struct {
     /// Index of linear memory
     memory_index: u32,
@@ -181,7 +182,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.mergeTypes(gpa);
     try self.setupExports(gpa);
     try self.relocateCode(gpa);
-    try self.relocateData(gpa);
+    try self.relocateAtoms(gpa);
 
     try @import("emit_wasm.zig").emit(self);
 }
@@ -601,9 +602,9 @@ pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, segme
 
     const result = try self.data.getOrPut(gpa, segment_name);
     if (!result.found_existing) {
-        const index = @intCast(u32, self.data.count());
+        const index = @intCast(u32, self.data.count() - 1);
         result.value_ptr.* = .{
-            .alignment = 0,
+            .alignment = 1,
             .data = undefined,
             .memory_index = 0,
             .offset = .{ .i32_const = 0 },
@@ -611,7 +612,7 @@ pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, segme
             .segment_index = index,
             .size = 0,
         };
-        return segment_index;
+        return index;
     } else return result.value_ptr.*.segment_index;
 }
 
@@ -656,6 +657,32 @@ fn allocateAtoms(self: *Wasm) !void {
             }
 
             offset += atom.size;
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+    }
+}
+
+fn relocateAtoms(self: *Wasm, gpa: *Allocator) !void {
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const segment_index = entry.key_ptr.*;
+        const segment: *OutputSegment = &self.data.values()[segment_index];
+        var atom: *Atom = entry.value_ptr.*.getFirst();
+
+        const code = try gpa.alloc(u8, segment.size);
+        std.mem.set(u8, code, 0);
+        segment.data = code.ptr;
+        while (true) {
+            // First perform relocations to rewrite the binary data
+            try atom.resolveRelocs(self);
+
+            // Merge the data into the final segment
+            const object = self.objects.items[atom.file];
+            const symbol: Symbol = object.symtable[atom.sym_index];
+            std.mem.copy(u8, code[symbol.kind.data.offset.?..][0..atom.size], atom.code.items);
 
             if (atom.next) |next| {
                 atom = next;
