@@ -94,14 +94,19 @@ pub fn resolveRelocs(self: *Atom, gpa: *Allocator, wasm_bin: *Wasm) !void {
     });
 
     for (self.relocs.items) |reloc| {
+        const rel_symbol: *Symbol = &object.symtable[reloc.index];
         switch (reloc.relocation_type) {
             .R_WASM_TABLE_INDEX_I32 => {
-                const rel_symbol = &object.symtable[reloc.index];
                 if (requiresGOT(rel_symbol.*)) continue;
                 log.debug("Relocating '{s}' ({s})", .{ rel_symbol.name, @tagName(reloc.relocation_type) });
                 try wasm_bin.elements.appendSymbol(gpa, rel_symbol);
             },
             else => |tag| log.debug("TODO: support relocation type '{s}'", .{@tagName(tag)}),
+        }
+
+        if (rel_symbol.isUndefined() and !rel_symbol.isWeak()) {
+            log.err("Undefined relocation symbol '{s}' for file '{s}'", .{ rel_symbol.name, object.name });
+            return error.UndefinedSymbol;
         }
     }
 }
