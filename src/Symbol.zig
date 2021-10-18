@@ -15,6 +15,10 @@ module_name: ?[]const u8 = null,
 /// An union that represents both the type of symbol
 /// as well as the data it holds.
 kind: Kind,
+/// Used to determine if a symbol is referenced or not,
+/// which may in turn mean it will (not) be included in the
+/// final binary. By default this is set to false.
+marked: bool = false,
 
 /// A union of possible symbol types, providing
 /// access to type-dependent information.
@@ -126,10 +130,11 @@ pub fn getTableIndex(self: *Symbol) ?u32 {
 /// Verifies if the given symbol should be imported from the
 /// host environment or not
 pub fn requiresImport(self: Symbol) bool {
-    if (self.kind == .data) return false;
-    // if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
-    if (self.isDefined()) return false;
+    if (!self.isUndefined()) return false;
     if (self.isWeak()) return false;
+    if (self.kind == .data) return false;
+    // if (!self.marked) return false; // Do not import unreferenced symbols
+    // if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
 
     return true;
 }

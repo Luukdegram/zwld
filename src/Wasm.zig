@@ -52,9 +52,6 @@ code: std.ArrayListUnmanaged([]u8) = .{},
 /// Output data section, keyed by the segment name
 data: std.StringArrayHashMapUnmanaged(OutputSegment) = .{},
 
-// a global variable that defines the stack pointer of the program
-var stack_symbol: ?Symbol = null;
-
 pub const SymbolWithLoc = struct {
     sym_index: u32,
     file: u16,
@@ -171,12 +168,12 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     for (self.objects.items) |_, obj_idx| {
         try self.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
+    try self.setupLinkerSymbols(gpa);
     for (self.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
     }
-
+    try self.mergeImports(gpa);
     try self.allocateAtoms();
-    try self.setupLinkerSymbols(gpa);
     try self.setupMemory(gpa);
     try self.mergeSections(gpa);
     try self.mergeTypes(gpa);
@@ -195,10 +192,9 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
     for (object.symtable) |*symbol, i| {
         const sym_idx = @intCast(u32, i);
 
-        // Check if they should be imported, if so: add them to the import section.
-        if (symbol.requiresImport()) {
-            log.debug("Symbol '{s}' will be imported", .{symbol.name});
-            try self.imports.appendSymbol(gpa, symbol);
+        if (std.mem.eql(u8, symbol.name, Symbol.linker_defined.names.indirect_function_table)) {
+            Symbol.linker_defined.indirect_function_table = symbol;
+            continue;
         }
 
         if (symbol.isWeak() or symbol.isGlobal()) {
@@ -346,31 +342,17 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
 /// Creates symbols that are made by the linker, rather than the compiler/object file
 fn setupLinkerSymbols(self: *Wasm, gpa: *Allocator) !void {
     // Create symbol for our stack pointer
-    stack_symbol = try self.createGlobal(gpa, "__stack_pointer", .mutable, .i32);
-}
+    const stack_symbol = &Symbol.linker_defined.stack_pointer;
 
-fn createGlobal(
-    self: *Wasm,
-    gpa: *Allocator,
-    name: []const u8,
-    mutability: enum { mutable, immutable },
-    valtype: wasm.ValueType,
-) !Symbol {
-    const global = try self.globals.create(
-        gpa,
-        if (mutability == .mutable) .mutable else .immutable,
-        valtype,
-    );
-
-    var sym: Symbol = .{
-        .flags = 0,
-        .name = name,
-        .kind = .{ .global = .{
-            .index = global.global_idx,
-            .global = global,
-        } },
-    };
-    return sym;
+    stack_symbol.* = if (self.global_symbols.get("__stack_pointer")) |sym_with_loc| blk: {
+        // TODO: Make this a lot nicer by logic to replace symbols
+        const object = self.objects.items[sym_with_loc.file];
+        const symbol = &object.symtable[sym_with_loc.sym_index];
+        symbol.marked = true;
+        try self.globals.append(gpa, 0, symbol.kind.global.global);
+        symbol.kind.global.global = &self.globals.items.items[symbol.kind.global.global.global_idx];
+        break :blk symbol;
+    } else null;
 }
 
 const SymbolIterator = struct {
@@ -433,10 +415,7 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                             });
                         },
                         .R_WASM_GLOBAL_INDEX_LEB => {
-                            const index: u32 = if (symbol.isUndefined())
-                                symbol.kind.global.global.global_idx
-                            else
-                                object.globals[symbol.index().?].global_idx;
+                            const index = symbol.kind.global.global.global_idx;
                             log.debug("Performing relocation for global symbol '{s}' at offset=0x{x:0>8} body_offset=0x{x:0>8} index=({d})", .{
                                 symbol.name,
                                 rel.offset,
@@ -461,6 +440,17 @@ inline fn isInbetween(min: u32, length: u32, value: u32) bool {
     return value >= min and value <= min + length;
 }
 
+fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
+    for (self.objects.items) |object| {
+        for (object.symtable) |*symbol| {
+            if (symbol.requiresImport()) {
+                log.debug("Symbol '{s}' will be imported", .{symbol.name});
+                try self.imports.appendSymbol(gpa, symbol);
+            }
+        }
+    }
+}
+
 /// Sets up the memory section of the wasm module, as well as the stack.
 fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Setting up memory layout", .{});
@@ -474,8 +464,10 @@ fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
     memory_ptr += stack_size;
 
     // set stack value on global
-    const global: *wasm.Global = stack_symbol.?.kind.global.global;
-    global.init = .{ .i32_const = @intCast(i32, @bitCast(i64, memory_ptr)) };
+    if (Symbol.linker_defined.stack_pointer) |stack_pointer| {
+        const global: *wasm.Global = stack_pointer.kind.global.global;
+        global.init = .{ .i32_const = @intCast(i32, @bitCast(i64, memory_ptr)) };
+    }
 
     // setup memory TODO: Calculate based on data segments and configered pages by user
     try self.memories.append(gpa, .{

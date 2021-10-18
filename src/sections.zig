@@ -129,9 +129,6 @@ pub const Imports = struct {
                 }
                 table.table.table_idx = ret.value_ptr.*;
                 log.debug("Imported table '{s}' at index ({d})", .{ import_name, table.index });
-                if (std.mem.eql(u8, import_name, Symbol.linker_defined.names.indirect_function_table)) {
-                    Symbol.linker_defined.indirect_function_table = symbol;
-                }
             },
             else => unreachable, // programmer error: Given symbol cannot be imported
         }
