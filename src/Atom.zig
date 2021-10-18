@@ -86,7 +86,7 @@ pub fn getLast(self: *Atom) *Atom {
 
 pub fn resolveRelocs(self: *Atom, gpa: *Allocator, wasm_bin: *Wasm) !void {
     const object = wasm_bin.objects.items[self.file];
-    const symbol = object.symtable[self.sym_index];
+    const symbol: Symbol = object.symtable[self.sym_index];
 
     log.debug("Resolving relocs in atom '{s}' count({d})", .{
         symbol.name,
@@ -97,9 +97,19 @@ pub fn resolveRelocs(self: *Atom, gpa: *Allocator, wasm_bin: *Wasm) !void {
         const rel_symbol: *Symbol = &object.symtable[reloc.index];
         switch (reloc.relocation_type) {
             .R_WASM_TABLE_INDEX_I32 => {
-                if (requiresGOT(rel_symbol.*)) continue;
-                log.debug("Relocating '{s}' ({s})", .{ rel_symbol.name, @tagName(reloc.relocation_type) });
-                try wasm_bin.elements.appendSymbol(gpa, rel_symbol);
+                if (!requiresGOTAccess(wasm_bin, rel_symbol.*)) {
+                    try wasm_bin.elements.appendSymbol(gpa, rel_symbol);
+                }
+                const index = rel_symbol.getTableIndex() orelse 0;
+                const segment = object.data.segments[symbol.index().?];
+                const offset = reloc.offset - segment.seg_offset - symbol.kind.data.offset.?;
+                log.debug("Relocating '{s}' offset=0x{x:0>8} target=0x{x:0>8} value={d}", .{
+                    rel_symbol.name,
+                    reloc.offset,
+                    offset,
+                    index,
+                });
+                std.mem.writeIntLittle(u32, self.code.items[offset..][0..4], index);
             },
             else => |tag| log.debug("TODO: support relocation type '{s}'", .{@tagName(tag)}),
         }
@@ -112,7 +122,11 @@ pub fn resolveRelocs(self: *Atom, gpa: *Allocator, wasm_bin: *Wasm) !void {
 }
 
 /// Determines if a given symbol requires access to the global offset table
-fn requiresGOT(symbol: Symbol) bool {
+fn requiresGOTAccess(wasm_bin: *const Wasm, symbol: Symbol) bool {
+    // TODO: replace below check with checking if this is not
+    // a PIE binary. Because only then, GOTAccess *may* be required.
+    _ = wasm_bin;
+    if (true) return false;
     if (symbol.isHidden() or symbol.isLocal()) return false;
     if (symbol.isDefined()) return false;
     return true;

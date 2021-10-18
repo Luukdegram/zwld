@@ -247,19 +247,22 @@ fn emitExport(exported: data.Export, writer: anytype) !void {
 
 fn emitElement(element: @import("sections.zig").Elements, writer: anytype) !void {
     var flags: u32 = 0;
-    if (Symbol.linker_defined.indirect_function_table) |table| {
+    var index: ?u32 = if (Symbol.linker_defined.indirect_function_table) |symbol| blk: {
         flags |= 0x2;
-        try leb.writeULEB128(writer, flags);
-        try leb.writeULEB128(writer, table.kind.table.index);
-    }
+        break :blk symbol.kind.table.index;
+    } else null;
+    try leb.writeULEB128(writer, flags);
+    if (index) |idx|
+        try leb.writeULEB128(writer, idx);
+
     try emitInitExpression(.{ .i32_const = 0 }, writer);
     if (flags & 0x3 != 0) {
         try leb.writeULEB128(writer, @as(u8, 0));
     }
 
     try leb.writeULEB128(writer, element.functionCount());
-    for (element.indirect_functions.items) |symbol, index| {
-        std.debug.assert(symbol.kind.function.table_index.? == index);
+    for (element.indirect_functions.items) |symbol, el_index| {
+        std.debug.assert(symbol.kind.function.table_index.? == el_index);
         try leb.writeULEB128(writer, symbol.kind.function.functionIndex());
     }
 }

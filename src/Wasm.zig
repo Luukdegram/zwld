@@ -197,7 +197,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
 
         // Check if they should be imported, if so: add them to the import section.
         if (symbol.requiresImport()) {
-            log.debug("Symbol '{s}' should be imported", .{symbol.name});
+            log.debug("Symbol '{s}' will be imported", .{symbol.name});
             try self.imports.appendSymbol(gpa, symbol);
         }
 
@@ -433,12 +433,10 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                             });
                         },
                         .R_WASM_GLOBAL_INDEX_LEB => {
-                            const index: u32 = if (symbol.isUndefined()) blk: {
-                                break :blk self.imports.imported_globals.get(.{
-                                    .module_name = symbol.module_name.?,
-                                    .name = symbol.name,
-                                }).?;
-                            } else object.globals[symbol.index().?].global_idx;
+                            const index: u32 = if (symbol.isUndefined())
+                                symbol.kind.global.global.global_idx
+                            else
+                                object.globals[symbol.index().?].global_idx;
                             log.debug("Performing relocation for global symbol '{s}' at offset=0x{x:0>8} body_offset=0x{x:0>8} index=({d})", .{
                                 symbol.name,
                                 rel.offset,

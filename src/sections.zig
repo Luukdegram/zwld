@@ -115,7 +115,7 @@ pub const Imports = struct {
                     try self.imported_symbols.append(gpa, symbol);
                     ret.value_ptr.* = @intCast(u32, self.imported_globals.count() - 1);
                 }
-                global.index = ret.value_ptr.*;
+                global.global.global_idx = ret.value_ptr.*;
                 log.debug("Imported global '{s}' at index ({d})", .{ import_name, global.index });
             },
             .table => |*table| {
@@ -127,8 +127,11 @@ pub const Imports = struct {
                     try self.imported_symbols.append(gpa, symbol);
                     ret.value_ptr.* = @intCast(u32, self.imported_tables.count() - 1);
                 }
-                table.index = ret.value_ptr.*;
+                table.table.table_idx = ret.value_ptr.*;
                 log.debug("Imported table '{s}' at index ({d})", .{ import_name, table.index });
+                if (std.mem.eql(u8, import_name, Symbol.linker_defined.names.indirect_function_table)) {
+                    Symbol.linker_defined.indirect_function_table = symbol;
+                }
             },
             else => unreachable, // programmer error: Given symbol cannot be imported
         }
