@@ -114,6 +114,35 @@ pub fn findImport(self: *const Object, import_kind: wasm.ExternalType, index: u3
     } else unreachable; // Only existing imports are allowed to be found
 }
 
+/// Counts the entries of imported `kind` and returns the result
+pub fn importedCountByKind(self: *const Object, kind: wasm.ExternalType) u32 {
+    var i: u32 = 0;
+    return for (self.imports) |imp| {
+        if (@as(wasm.ExternalType, imp.kind) == kind) i += 1;
+    } else i;
+}
+
+/// Returns a function by a given id, rather than its index within the list.
+pub fn getFunction(self: *const Object, id: u32) *wasm.Func {
+    return for (self.functions) |*func| {
+        if (func.func_idx == id) break func;
+    } else unreachable;
+}
+
+/// Returns a global by a given id, rather than by its index within the list.
+pub fn getGlobal(self: *const Object, id: u32) *wasm.Global {
+    return for (self.globals) |*global| {
+        if (global.global_idx == id) break global;
+    } else unreachable;
+}
+
+/// Returns a table by a given id, rather than by its index within the list.
+pub fn getTable(self: *const Object, id: u32) *wasm.Table {
+    return for (self.tables) |*table| {
+        if (table.table_idx == id) break table;
+    } else unreachable;
+}
+
 /// Checks if the object file is an MVP version.
 /// When that's the case, we check if there's an import table definiton with its name
 /// set to '__indirect_function_table". When that's also the case,
@@ -126,10 +155,7 @@ fn checkLegacyIndirectFunctionTable(self: *Object) !?Symbol {
         if (sym.kind == .table) table_count += 1;
     }
 
-    var import_table_count: usize = 0;
-    for (self.imports) |imp| {
-        if (imp.kind == .table) import_table_count += 1;
-    }
+    const import_table_count = self.importedCountByKind(.table);
 
     // For each import table, we also have a symbol so this is not a legacy object file
     if (import_table_count == table_count) return null;
@@ -341,7 +367,7 @@ fn Parser(comptime ReaderType: type) type {
                         for (try readVec(&self.object.functions, reader, gpa)) |*func, index| {
                             func.* = .{
                                 .type_idx = try readLeb(u32, reader),
-                                .func_idx = @intCast(u32, index),
+                                .func_idx = @intCast(u32, index + self.object.importedCountByKind(.function)),
                                 .func_type = &self.object.types[func.type_idx],
                             };
                         }
@@ -352,7 +378,7 @@ fn Parser(comptime ReaderType: type) type {
                             table.* = .{
                                 .reftype = try readEnum(wasm.RefType, reader),
                                 .limits = try readLimits(reader),
-                                .table_idx = @intCast(u32, index),
+                                .table_idx = @intCast(u32, index + self.object.importedCountByKind(.table)),
                             };
                         }
                         try assertEnd(reader);
@@ -369,7 +395,7 @@ fn Parser(comptime ReaderType: type) type {
                                 .valtype = try readEnum(wasm.ValueType, reader),
                                 .mutable = (try reader.readByte()) == 0x01,
                                 .init = try readInit(reader),
-                                .global_idx = @intCast(u32, index),
+                                .global_idx = @intCast(u32, index + self.object.importedCountByKind(.global)),
                             };
                         }
                         try assertEnd(reader);
@@ -677,7 +703,7 @@ fn Parser(comptime ReaderType: type) type {
                             const func: *wasm.Func = if (is_undefined)
                                 &maybe_import.?.kind.function
                             else
-                                &self.object.functions[index];
+                                self.object.getFunction(index);
 
                             break :blk .{ .function = .{ .index = index, .func = func } };
                         },
@@ -685,14 +711,14 @@ fn Parser(comptime ReaderType: type) type {
                             const global = if (is_undefined)
                                 &maybe_import.?.kind.global
                             else
-                                &self.object.globals[index];
+                                self.object.getGlobal(index);
                             break :blk .{ .global = .{ .index = index, .global = global } };
                         },
                         .table => blk: {
                             const table = if (is_undefined)
                                 &maybe_import.?.kind.table
                             else
-                                &self.object.tables[index];
+                                self.object.getTable(index);
                             break :blk .{ .table = .{ .index = index, .table = table } };
                         },
                         .event => .{ .event = .{ .index = index } },
