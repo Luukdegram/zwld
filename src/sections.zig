@@ -173,12 +173,24 @@ pub const Globals = struct {
     /// A list of `wasm.Global`s
     /// Once appended to this list, they should no longer be mutated
     items: std.ArrayListUnmanaged(wasm.Global) = .{},
+    /// List of internal GOT symbols
+    got_symbols: std.ArrayListUnmanaged(*Symbol) = .{},
 
     /// Appends a new global and sets the `global_idx` on the global based on the
     /// current count of globals and the given `offset`.
     pub fn append(self: *Globals, gpa: *Allocator, offset: u32, global: *wasm.Global) !void {
         global.global_idx = offset + self.count();
         try self.items.append(gpa, global.*);
+    }
+
+    /// Appends a new entry to the internal GOT
+    pub fn addGOTEntry(self: *Globals, gpa: *Allocator, symbol: *Symbol, wasm_bin: *Wasm) !void {
+        if (symbol.kind == .function) {
+            try wasm_bin.tables.createIndirectFunctionTable(gpa, wasm_bin);
+            try wasm_bin.elements.appendSymbol(gpa, symbol);
+        }
+
+        try self.got_symbols.append(gpa, symbol);
     }
 
     /// Returns the total amount of globals of the global section
@@ -212,6 +224,7 @@ pub const Globals = struct {
 
     pub fn deinit(self: *Globals, gpa: *Allocator) void {
         self.items.deinit(gpa);
+        self.got_symbols.deinit(gpa);
         self.* = undefined;
     }
 };
@@ -304,7 +317,7 @@ pub const Tables = struct {
         }
 
         const index = self.count();
-        try self.items.append(.{
+        try self.items.append(gpa, .{
             .limits = .{ .min = 0, .max = null },
             .reftype = .funcref,
             .table_idx = index,
@@ -314,7 +327,7 @@ pub const Tables = struct {
             .name = Symbol.linker_defined.names.indirect_function_table, // __indirect_function_table
             .kind = .{ .table = .{ .index = index, .table = &self.items.items[index] } },
         };
-        wasm_bin.synthetic_symbols.append(gpa, symbol);
+        try wasm_bin.synthetic_symbols.append(gpa, symbol);
         Symbol.linker_defined.indirect_function_table = &wasm_bin.synthetic_symbols.items[wasm_bin.synthetic_symbols.items.len - 1];
 
         log.debug("Created indirect function table at index {d}", .{index});

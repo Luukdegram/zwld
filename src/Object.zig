@@ -114,6 +114,72 @@ pub fn findImport(self: *const Object, import_kind: wasm.ExternalType, index: u3
     } else unreachable; // Only existing imports are allowed to be found
 }
 
+/// Checks if the object file is an MVP version.
+/// When that's the case, we check if there's an import table definiton with its name
+/// set to '__indirect_function_table". When that's also the case,
+/// we initialize a new table symbol that corresponds to that import and return that symbol.
+///
+/// When the object file is *NOT* MVP, we return `null`.
+fn checkLegacyIndirectFunctionTable(self: *Object) !?Symbol {
+    var table_count: usize = 0;
+    for (self.symtable) |sym| {
+        if (sym.kind == .table) table_count += 1;
+    }
+
+    var import_table_count: usize = 0;
+    for (self.imports) |imp| {
+        if (imp.kind == .table) import_table_count += 1;
+    }
+
+    // For each import table, we also have a symbol so this is not a legacy object file
+    if (import_table_count == table_count) return null;
+
+    if (table_count != 0) {
+        log.err("Expected a table entry symbol for each of the {d} table(s), but instead got {d} symbols.", .{
+            import_table_count,
+            table_count,
+        });
+        return error.MissingTableSymbols;
+    }
+
+    // MVP object files cannot have any table definitions, only imports (for the indirect function table).
+    if (self.tables.len > 0) {
+        log.err("Unexpected table definition without representing table symbols.", .{});
+        return error.UnexpectedTable;
+    }
+
+    if (import_table_count != 1) {
+        log.err("Found more than one table import, but no representing table symbols", .{});
+        return error.MissingTableSymbols;
+    }
+
+    var table_import: wasm.Import = for (self.imports) |imp| {
+        if (imp.kind == .table) {
+            break imp;
+        }
+    } else unreachable;
+
+    if (!std.mem.eql(u8, table_import.name, Symbol.linker_defined.names.indirect_function_table)) {
+        log.err("Non-indirect function table import '{s}' is missing a corresponding symbol", .{table_import.name});
+        return error.MissingTableSymbols;
+    }
+
+    var table_symbol: Symbol = .{
+        .flags = 0,
+        .name = table_import.name,
+        .module_name = table_import.module_name,
+        .kind = .{
+            .table = .{
+                .index = 0,
+                .table = &self.imports[table_import.kind.table.table_idx].kind.table,
+            },
+        },
+    };
+    table_symbol.setFlag(.WASM_SYM_UNDEFINED);
+    table_symbol.setFlag(.WASM_SYM_NO_STRIP);
+    return table_symbol;
+}
+
 /// Error set containing parsing errors.
 /// Merged with reader's errorset by `Parser`
 pub const ParseError = error{
@@ -143,6 +209,10 @@ pub const ParseError = error{
     UnsupportedVersion,
     /// When reading the data in leb128 compressed format, its value was overflown.
     Overflow,
+    /// Found table definitions but no corresponding table symbols
+    MissingTableSymbols,
+    /// Did not expect a table definiton, but did find one
+    UnexpectedTable,
 };
 
 fn parse(self: *Object, gpa: *Allocator, reader: anytype) Parser(@TypeOf(reader)).Error!void {
@@ -527,10 +597,12 @@ fn Parser(comptime ReaderType: type) type {
                     self.object.comdat_info = comdats;
                 },
                 .WASM_SYMBOL_TABLE => {
-                    const symbols = try gpa.alloc(Symbol, count);
-                    for (symbols) |*symbol| {
-                        symbol.* = try self.parseSymbol(gpa, reader);
+                    var symbols = try std.ArrayList(Symbol).initCapacity(gpa, count);
 
+                    var i: usize = 0;
+                    while (i < count) : (i += 1) {
+                        const symbol = symbols.addOneAssumeCapacity();
+                        symbol.* = try self.parseSymbol(gpa, reader);
                         log.debug("Found symbol: type({s}) name({s}) flags(0b{b:0>8})", .{
                             @tagName(symbol.kind),
                             symbol.name,
@@ -538,7 +610,14 @@ fn Parser(comptime ReaderType: type) type {
                         });
                     }
 
-                    self.object.symtable = symbols;
+                    // we found all symbols, check for indirect function table
+                    // in case of an MVP object file
+                    if (try self.object.checkLegacyIndirectFunctionTable()) |symbol| {
+                        try symbols.append(symbol);
+                        log.debug("Found legacy indirect function table. Created symbol", .{});
+                    }
+
+                    self.object.symtable = symbols.toOwnedSlice();
                 },
             }
         }

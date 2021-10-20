@@ -168,11 +168,11 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     for (self.objects.items) |_, obj_idx| {
         try self.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
-    try self.setupLinkerSymbols(gpa);
     for (self.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
     }
     try self.mergeImports(gpa);
+    try self.setupLinkerSymbols(gpa);
     try self.allocateAtoms();
     try self.setupMemory(gpa);
     try self.mergeSections(gpa);
@@ -191,11 +191,6 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
 
     for (object.symtable) |*symbol, i| {
         const sym_idx = @intCast(u32, i);
-
-        if (std.mem.eql(u8, symbol.name, Symbol.linker_defined.names.indirect_function_table)) {
-            Symbol.linker_defined.indirect_function_table = symbol;
-            continue;
-        }
 
         if (symbol.isWeak() or symbol.isGlobal()) {
             const name = try gpa.dupe(u8, symbol.name);
@@ -264,7 +259,11 @@ fn mergeSections(self: *Wasm, gpa: *Allocator) !void {
 
     // merge tables
     {
-        log.debug("TODO: Merge tables", .{});
+        // first append the indirect function table if initialized
+        if (Symbol.linker_defined.indirect_function_table) |table| {
+            log.debug("Appending indirect function table", .{});
+            try self.tables.append(gpa, self.imports.tableCount(), table.kind.table.table);
+        }
         for (self.objects.items) |object| {
             for (object.tables) |*table| {
                 try self.tables.append(gpa, self.imports.tableCount(), table);
@@ -403,7 +402,7 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                     if (!isInbetween(code.offset, body_length, rel.offset)) {
                         continue;
                     }
-                    const symbol: Symbol = object.symtable[rel.index];
+                    const symbol: *Symbol = &object.symtable[rel.index];
                     const body_offset = rel.offset - code.offset;
                     switch (rel.relocation_type) {
                         .R_WASM_FUNCTION_INDEX_LEB,
@@ -413,8 +412,13 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                                 symbol.name,
                                 rel.offset,
                             });
+                            try self.elements.appendSymbol(gpa, symbol);
                         },
                         .R_WASM_GLOBAL_INDEX_LEB => {
+                            log.debug("GLOBAL TY: {s}", .{@tagName(symbol.kind)});
+                            if (symbol.kind != .global) {
+                                try self.globals.addGOTEntry(gpa, symbol, self);
+                            }
                             const index = symbol.kind.global.global.global_idx;
                             log.debug("Performing relocation for global symbol '{s}' at offset=0x{x:0>8} body_offset=0x{x:0>8} index=({d})", .{
                                 symbol.name,

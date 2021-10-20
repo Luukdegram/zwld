@@ -28,18 +28,18 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .type, wasm.types.count());
     }
-    // if (wasm.imports.symbolCount() != 0) {
-    //     log.debug("Writing 'Imports' section ({d})", .{wasm.imports.symbolCount()});
-    //     const offset = try reserveSectionHeader(file);
+    if (wasm.imports.symbolCount() != 0) {
+        log.debug("Writing 'Imports' section ({d})", .{wasm.imports.symbolCount()});
+        const offset = try reserveSectionHeader(file);
 
-    //     for (wasm.imports.symbols()) |symbol| {
-    //         try emitImportSymbol(symbol.*, writer);
-    //     }
+        for (wasm.imports.symbols()) |symbol| {
+            try emitImportSymbol(symbol.*, writer);
+        }
 
-    //     // TODO: Also emit GOT symbols and memory if the CLI option was provided
+        // TODO: Also emit GOT symbols and memory if the CLI option was provided
 
-    //     try emitSectionHeader(file, offset, .import, wasm.imports.symbolCount());
-    // }
+        try emitSectionHeader(file, offset, .import, wasm.imports.symbolCount());
+    }
     if (wasm.functions.count() != 0) {
         log.debug("Writing 'Functions' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);

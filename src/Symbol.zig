@@ -132,8 +132,8 @@ pub fn getTableIndex(self: *Symbol) ?u32 {
 pub fn requiresImport(self: Symbol) bool {
     if (!self.isUndefined()) return false;
     if (self.isWeak()) return false;
+    if (!self.marked) return false; // Do not import unreferenced symbols
     if (self.kind == .data) return false;
-    // if (!self.marked) return false; // Do not import unreferenced symbols
     // if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
 
     return true;
