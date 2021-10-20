@@ -192,6 +192,10 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
     for (object.symtable) |*symbol, i| {
         const sym_idx = @intCast(u32, i);
 
+        if (std.mem.eql(u8, symbol.name, Symbol.linker_defined.names.indirect_function_table)) {
+            Symbol.linker_defined.indirect_function_table = symbol;
+        }
+
         if (symbol.isWeak() or symbol.isGlobal()) {
             const name = try gpa.dupe(u8, symbol.name);
             const result = try self.global_symbols.getOrPut(gpa, name);
