@@ -56,13 +56,11 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .table, wasm.tables.count());
     }
-    if (wasm.memories.items.len != 0) {
-        log.debug("Writing 'Memories' section ({d})", .{wasm.memories.items.len});
+    if (!wasm.options.import_memory) {
+        log.debug("Writing 'Memory' section", .{});
         const offset = try reserveSectionHeader(file);
-        for (wasm.memories.items) |mem| {
-            try emitMemory(mem, writer);
-        }
-        try emitSectionHeader(file, offset, .memory, wasm.memories.items.len);
+        try emitLimits(wasm.memories.limits, writer);
+        try emitSectionHeader(file, offset, .memory, 1);
     }
     if (wasm.globals.count() != 0) {
         log.debug("Writing 'Globals' section ({d})", .{wasm.globals.count()});

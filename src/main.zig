@@ -25,6 +25,7 @@ const usage =
     \\-h, --help                         Print this help and exit
     \\-o [path]                          Output path of the binary
     \\--entry <entry>                    Name of entry point symbol
+    \\--global-base=<value>              Value from where the global data will start
     \\--import-memory                    Import memory from the host environment
     \\--import-table                     Import function table from the host environment
     \\--initial-memory=<value>           Initial size of the linear memory
@@ -54,6 +55,7 @@ pub fn main() !void {
 
     var positionals = std.ArrayList([]const u8).init(arena);
     var entry_name: ?[]const u8 = null;
+    var global_base: ?u32 = null;
     var import_memory: bool = false;
     var import_table: bool = false;
     var initial_memory: ?u32 = null;
@@ -73,6 +75,14 @@ pub fn main() !void {
             if (i + 1 > args.len) printErrorAndExit("Missing entry name argument", .{});
             entry_name = args[i + 1];
             i += 1;
+            continue;
+        }
+        if (mem.startsWith(u8, arg, "--global-base")) {
+            const index = std.mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for global base", .{});
+            global_base = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch printErrorAndExit(
+                "Could not parse value '{s}' into integer",
+                .{arg[index + 1 ..]},
+            );
             continue;
         }
         if (mem.eql(u8, arg, "--import-memory")) {
@@ -130,6 +140,7 @@ pub fn main() !void {
 
     var wasm_bin = try Wasm.openPath(output_path.?, .{
         .entry_name = entry_name,
+        .global_base = global_base,
         .import_memory = import_memory,
         .import_table = import_table,
         .initial_memory = initial_memory,

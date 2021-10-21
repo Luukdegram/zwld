@@ -39,8 +39,10 @@ imports: sections.Imports = .{},
 functions: sections.Functions = .{},
 /// Output table section
 tables: sections.Tables = .{},
-/// Output memory section
-memories: std.ArrayListUnmanaged(wasm.Memory) = .{},
+/// Output memory section, this will only be used when `options.import_memory`
+/// is set to false. The limits will be set, based on the total data section size
+/// and other configuration options.
+memories: wasm.Memory = .{ .limits = .{ .min = 0, .max = null } },
 /// Output global section
 globals: sections.Globals = .{},
 /// Output export section
@@ -97,6 +99,8 @@ pub const Options = struct {
     no_entry: bool = false,
     /// Tell the linker to put the stack first, instead of after the data
     stack_first: bool = false,
+    /// Points to where the global data will start
+    global_base: ?u32 = null,
 };
 
 /// Initializes a new wasm binary file at the given path.
@@ -140,7 +144,6 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.elements.deinit(gpa);
     self.tables.deinit(gpa);
     self.code.deinit(gpa);
-    self.memories.deinit(gpa);
     self.data.deinit(gpa);
     self.file.close();
     self.* = undefined;
@@ -174,7 +177,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.mergeImports(gpa);
     try self.setupLinkerSymbols(gpa);
     try self.allocateAtoms();
-    try self.setupMemory(gpa);
+    try self.setupMemory();
     try self.mergeSections(gpa);
     try self.mergeTypes(gpa);
     try self.setupExports(gpa);
@@ -416,7 +419,10 @@ fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
                                 symbol.name,
                                 rel.offset,
                             });
-                            try self.elements.appendSymbol(gpa, symbol);
+                            // try self.elements.appendSymbol(gpa, symbol);
+
+                            const index = symbol.kind.function.func.func_idx;
+                            leb.writeUnsignedFixed(5, code.data[body_offset..][0..5], index);
                         },
                         .R_WASM_GLOBAL_INDEX_LEB => {
                             log.debug("GLOBAL TY: {s}", .{@tagName(symbol.kind)});
@@ -460,30 +466,71 @@ fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
 }
 
 /// Sets up the memory section of the wasm module, as well as the stack.
-fn setupMemory(self: *Wasm, gpa: *Allocator) !void {
+fn setupMemory(self: *Wasm) !void {
     log.debug("Setting up memory layout", .{});
     const page_size = 64 * 1024;
     const stack_size = page_size * 1;
     const stack_alignment = 16;
-    var memory_ptr: u64 = 0;
-    memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
+    var memory_ptr: u32 = self.options.global_base orelse 1024;
+    memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
 
+    for (self.data.values()) |*_seg| {
+        const segment: *OutputSegment = _seg;
+        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, @as(u32, 1) << @intCast(u5, segment.alignment));
+        segment.offset.i32_const = @bitCast(i32, memory_ptr);
+        memory_ptr += segment.size;
+    }
+
+    memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
     // TODO: Calculate this according to user input
     memory_ptr += stack_size;
+
+    // Setup the max amount of pages
+    const max_memory_allowed: u32 = @intCast(u32, (@as(u33, 1) << @intCast(u6, (self.options.max_memory orelse 32))) - 1);
+
+    if (self.options.initial_memory) |initial_memory| {
+        if (!std.mem.isAligned(initial_memory, page_size)) {
+            log.err("Initial memory must be {d}-byte aligned", .{page_size});
+            return error.MissAlignment;
+        }
+        if (memory_ptr > initial_memory) {
+            log.err("Initial memory too small, must be at least {d} bytes", .{memory_ptr});
+            return error.MemoryTooSmall;
+        }
+        if (initial_memory > max_memory_allowed) {
+            log.err("Initial memory exceeds maximum memory {d}", .{max_memory_allowed});
+            return error.MemoryTooBig;
+        }
+        memory_ptr = initial_memory;
+    }
+
+    // In case we do not import memory, but define it ourselves,
+    // set the minimum amount of pages on the memory section.
+    self.memories.limits.min = std.mem.alignForwardGeneric(u32, memory_ptr, page_size) / page_size;
+    log.debug("Total memory pages: {d}", .{self.memories.limits.min});
+
+    if (self.options.max_memory) |max_memory| {
+        if (!std.mem.isAligned(max_memory, page_size)) {
+            log.err("Maximum memory must be {d}-byte aligned", .{page_size});
+            return error.MissAlignment;
+        }
+        if (memory_ptr > max_memory) {
+            log.err("Maxmimum memory too small, must be at least {d} bytes", .{memory_ptr});
+            return error.MemoryTooSmall;
+        }
+        if (max_memory > max_memory_allowed) {
+            log.err("Maximum memory exceeds maxmium amount {d}", .{max_memory_allowed});
+            return error.MemoryTooBig;
+        }
+        self.memories.limits.max = max_memory / page_size;
+        log.debug("Maximum memory pages: {d}", .{self.memories.limits.max});
+    }
 
     // set stack value on global
     if (Symbol.linker_defined.stack_pointer) |stack_pointer| {
         const global: *wasm.Global = stack_pointer.kind.global.global;
-        global.init = .{ .i32_const = @intCast(i32, @bitCast(i64, memory_ptr)) };
+        global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
     }
-
-    // setup memory TODO: Calculate based on data segments and configered pages by user
-    try self.memories.append(gpa, .{
-        .limits = .{
-            .min = 2,
-            .max = null,
-        },
-    });
 }
 
 /// From a given object's index and the index of the segment, returns the corresponding
