@@ -474,8 +474,7 @@ fn setupMemory(self: *Wasm) !void {
     var memory_ptr: u32 = self.options.global_base orelse 1024;
     memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
 
-    for (self.data.values()) |*_seg| {
-        const segment: *OutputSegment = _seg;
+    for (self.data.values()) |*segment| {
         memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, @as(u32, 1) << @intCast(u5, segment.alignment));
         segment.offset.i32_const = @bitCast(i32, memory_ptr);
         memory_ptr += segment.size;
@@ -580,21 +579,6 @@ fn allocateAtoms(self: *Wasm) !void {
                 offset,
                 offset + atom.size,
             });
-
-            // Update aliases to this atom
-            for (atom.aliases.items) |index| {
-                const alias_sym = &object.symtable[index].kind.data;
-                alias_sym.offset = offset;
-                alias_sym.index = segment_index;
-                alias_sym.size = atom.size;
-            }
-
-            // Update the symbol contained within this segment
-            for (atom.contained.items) |sym_at_off| {
-                const contained_sym = &object.symtable[sym_at_off.local_sym_index].kind.data;
-                contained_sym.index = segment_index;
-                contained_sym.offset = offset + sym_at_off.offset;
-            }
 
             offset += atom.size;
 

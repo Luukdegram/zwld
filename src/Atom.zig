@@ -14,10 +14,6 @@ const Allocator = mem.Allocator;
 sym_index: u32,
 /// Index into a list of object files
 file: u16,
-/// List of symbol aliases pointing to the same atom by different objects.
-aliases: std.ArrayListUnmanaged(u32) = .{},
-/// List of symbols contained within this atom (data symbols)
-contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
 /// Size of the atom, used to calculate section sizes in the final binary
 size: u32,
 /// List of relocations belonging to this atom
@@ -33,11 +29,6 @@ next: ?*Atom,
 /// Previous atom in relation to this atom.
 /// is null when this atom is the first in its order
 prev: ?*Atom,
-
-pub const SymbolAtOffset = struct {
-    local_sym_index: u32,
-    offset: u32,
-};
 
 /// Creates a new Atom with default fields
 pub fn create(gpa: *Allocator) !*Atom {
@@ -57,8 +48,6 @@ pub fn create(gpa: *Allocator) !*Atom {
 /// Also destroys itself, making any usage of this atom illegal.
 pub fn deinit(self: *Atom, gpa: *Allocator) void {
     self.relocs.deinit(gpa);
-    self.aliases.deinit(gpa);
-    self.contained.deinit(gpa);
     self.code.deinit(gpa);
     gpa.destroy(self);
 }

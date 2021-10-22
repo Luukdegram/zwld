@@ -795,21 +795,14 @@ fn assertEnd(reader: anytype) !void {
 /// Parses an object file into atoms, for code and data sections
 pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bin: *Wasm) !void {
     log.debug("Parsing data section into atoms", .{});
-    var symbols_per_segment = std.AutoArrayHashMap(u32, std.ArrayList(u32)).init(gpa);
-    defer for (symbols_per_segment.values()) |symbols| {
-        symbols.deinit();
-    } else symbols_per_segment.deinit();
-
-    for (self.data.segments) |_, index| {
-        try symbols_per_segment.putNoClobber(@intCast(u32, index), std.ArrayList(u32).init(gpa));
-    }
+    var symbol_for_segment = std.AutoArrayHashMap(u32, u32).init(gpa);
+    defer symbol_for_segment.deinit();
 
     for (self.symtable) |symbol, symbol_index| {
         switch (symbol.kind) {
             .data => |data| {
                 const index = data.index orelse continue;
-                const syms = symbols_per_segment.getPtr(index).?; // symbols cannot point to non-existing segment
-                try syms.append(@intCast(u32, symbol_index));
+                try symbol_for_segment.putNoClobber(index, @intCast(u32, symbol_index));
             },
             else => continue,
         }
@@ -829,18 +822,7 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
         atom.size = @intCast(u32, segment.data.len);
         atom.alignment = if (segment_meta.alignment > 0) @intCast(u32, segment_meta.alignment) else 1;
 
-        const symbol_list = symbols_per_segment.get(@intCast(u32, segment_index)).?;
-        for (symbol_list.items) |symbol_index| {
-            const symbol = self.symtable[symbol_index].kind.data;
-            if (symbol.offset.? > 0) {
-                try atom.contained.append(gpa, .{
-                    .local_sym_index = symbol_index,
-                    .offset = symbol.offset.?,
-                });
-            } else {
-                try atom.aliases.append(gpa, symbol_index);
-            }
-        }
+        atom.sym_index = symbol_for_segment.get(@intCast(u32, segment_index)).?;
 
         const relocations: []const wasm.Relocation = self.relocations.get(self.data.index) orelse &.{};
         for (relocations) |relocation| {
@@ -849,8 +831,8 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
             }
         }
 
-        std.sort.sort(u32, atom.aliases.items, wasm_bin.objects.items[object_index], sort);
-        atom.sym_index = atom.aliases.swapRemove(0); // alias should never be empty
+        // std.sort.sort(u32, atom.aliases.items, wasm_bin.objects.items[object_index], sort);
+        // atom.sym_index = atom.aliases.swapRemove(0); // alias should never be empty
         try atom.code.appendSlice(gpa, segment.data);
 
         log.debug("Data count: {d} - index: {d}", .{ wasm_bin.data.count(), final_segment_index });
