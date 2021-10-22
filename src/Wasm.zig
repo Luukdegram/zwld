@@ -53,6 +53,21 @@ elements: sections.Elements = .{},
 code: std.ArrayListUnmanaged([]u8) = .{},
 /// Output data section, keyed by the segment name
 data: std.StringArrayHashMapUnmanaged(OutputSegment) = .{},
+/// Represents non-synthetic section entries
+/// Used for code, data and custom sections.
+segments: std.ArrayListUnmanaged(Segment) = .{},
+/// Maps a data segment key (such as .rodata) to the index into `segments`
+data_segments: std.StringArrayHashMapUnmanaged(u32) = .{},
+
+/// Index into `atoms` that represents the code section
+code_section_index: ?u32 = null,
+
+pub const Segment = struct {
+    alignment: u32,
+    size: u32,
+    offset: u32,
+    data: [*]u8,
+};
 
 pub const SymbolWithLoc = struct {
     sym_index: u32,
@@ -176,7 +191,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     }
     try self.mergeImports(gpa);
     try self.setupLinkerSymbols(gpa);
-    try self.allocateAtoms();
+    // try self.allocateAtoms();
     try self.setupMemory();
     try self.mergeSections(gpa);
     try self.mergeTypes(gpa);
@@ -535,24 +550,38 @@ fn setupMemory(self: *Wasm) !void {
 /// From a given object's index and the index of the segment, returns the corresponding
 /// index of the segment within the final data section. When the segment does not yet
 /// exist, a new one will be initialized and appended. The new index will be returned in that case.
-pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, segment_index: u32) !u32 {
-    const object = self.objects.items[object_index];
-    const segment_name = object.segment_info[segment_index].outputName();
+pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, relocatable_index: u32) !u32 {
+    const object: Object = self.objects.items[object_index];
+    const relocatable_data = object.relocatable_data[relocatable_index];
+    const index = @intCast(u32, self.segments.items.len);
 
-    const result = try self.data.getOrPut(gpa, segment_name);
-    if (!result.found_existing) {
-        const index = @intCast(u32, self.data.count() - 1);
-        result.value_ptr.* = .{
-            .alignment = 1,
-            .data = undefined,
-            .memory_index = 0,
-            .offset = .{ .i32_const = 0 },
-            .section_offset = 0,
-            .segment_index = index,
-            .size = 0,
-        };
-        return index;
-    } else return result.value_ptr.*.segment_index;
+    switch (relocatable_data.type) {
+        .data => {
+            const segment_name = object.segment_info[relocatable_data.index].outputName();
+            const result = try self.data_segments.getOrPut(gpa, segment_name);
+            if (!result.found_existing) {
+                result.value_ptr.* = index;
+                try self.segments.append(gpa, .{
+                    .alignment = 1,
+                    .size = 0,
+                    .offset = 0,
+                    .data = undefined,
+                });
+                return index;
+            } else return result.value_ptr.*;
+        },
+        .code => return self.code_section_index orelse blk: {
+            self.code_section_index = index;
+            try self.segments.append(gpa, .{
+                .alignment = 1,
+                .size = 0,
+                .offset = 0,
+                .data = undefined,
+            });
+            break :blk index;
+        },
+        .custom => @panic("TODO: Custom section relocation"),
+    }
 }
 
 fn allocateAtoms(self: *Wasm) !void {
@@ -593,7 +622,7 @@ fn relocateAtoms(self: *Wasm, gpa: *Allocator) !void {
     var it = self.atoms.iterator();
     while (it.next()) |entry| {
         const segment_index = entry.key_ptr.*;
-        const segment: *OutputSegment = &self.data.values()[segment_index];
+        const segment: *Segment = &self.segments.items[segment_index];
         var atom: *Atom = entry.value_ptr.*.getFirst();
 
         const code = try gpa.alloc(u8, segment.size);

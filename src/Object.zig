@@ -78,6 +78,33 @@ segment_info: []const wasm.Segment = &.{},
 init_funcs: []const wasm.InitFunc = &.{},
 /// Comdat information
 comdat_info: []const wasm.Comdat = &.{},
+/// Represents non-synthetic sections that can essentially be mem-cpy'd into place
+/// after performing relocations.
+relocatable_data: []RelocatableData = &.{},
+
+/// Represents a single item within a section (depending on its `type`)
+const RelocatableData = struct {
+    /// The type of the relocatable data
+    type: enum { data, code, custom },
+    /// Pointer to the data of the segment, where it's length is written to `size`
+    data: [*]u8,
+    /// The size in bytes of the data representing the segment within the section
+    size: u32,
+    /// The index within the section itself
+    index: u32,
+    /// The offset within the section where the data starts
+    offset: u32,
+    /// Represents the index of the section it belongs to
+    section_index: u32,
+
+    /// Returns the alignment of the segment, by retrieving it from the segment
+    /// meta data of the given object file.
+    pub fn getAlignment(self: RelocatableData, object: *const Object) u32 {
+        if (self.type != .data) return 1;
+        const data_alignment = object.segment_info[self.index].alignment;
+        return if (data_alignment > 0) data_alignment else 1;
+    }
+};
 
 /// Initializes a new `Object` from a wasm object file.
 pub fn init(gpa: *Allocator, file: std.fs.File, path: []const u8) !Object {
@@ -277,6 +304,8 @@ fn Parser(comptime ReaderType: type) type {
             const version = try self.reader.reader().readIntLittle(u32);
 
             self.object.version = version;
+            var relocatable_data = std.ArrayList(RelocatableData).init(gpa);
+            defer relocatable_data.deinit();
 
             while (self.reader.reader().readByte()) |byte| {
                 const len = try readLeb(u32, self.reader.reader());
@@ -448,14 +477,22 @@ fn Parser(comptime ReaderType: type) type {
                     .data => {
                         var start = reader.context.bytes_left;
                         self.object.data.index = @intCast(u32, self.sections.items.len - 1);
-                        for (try readVec(&self.object.data.segments, reader, gpa)) |*segment| {
+                        for (try readVec(&self.object.data.segments, reader, gpa)) |*segment, index| {
                             segment.index = try readLeb(u32, reader);
                             segment.offset = try readInit(reader);
-                            const init_len = try readLeb(u32, reader);
+                            const data_len = try readLeb(u32, reader);
                             segment.seg_offset = @intCast(u32, start - reader.context.bytes_left);
-                            const init_data = try gpa.alloc(u8, init_len);
-                            try reader.readNoEof(init_data);
-                            segment.data = init_data;
+                            const data = try gpa.alloc(u8, data_len);
+                            try reader.readNoEof(data);
+                            segment.data = data;
+                            try relocatable_data.append(.{
+                                .type = .data,
+                                .data = data.ptr,
+                                .size = data_len,
+                                .index = @intCast(u32, index),
+                                .offset = segment.seg_offset,
+                                .section_index = self.object.data.index,
+                            });
                         }
                     },
                     else => try self.reader.reader().skipBytes(len, .{}),
@@ -466,6 +503,7 @@ fn Parser(comptime ReaderType: type) type {
                 else => |e| return e,
             }
             self.object.sections = self.sections.toOwnedSlice(gpa);
+            self.object.relocatable_data = relocatable_data.toOwnedSlice();
         }
 
         /// Based on the "features" custom section, parses it into a list of
@@ -795,61 +833,66 @@ fn assertEnd(reader: anytype) !void {
 /// Parses an object file into atoms, for code and data sections
 pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bin: *Wasm) !void {
     log.debug("Parsing data section into atoms", .{});
-    var symbol_for_segment = std.AutoArrayHashMap(u32, u32).init(gpa);
+    const Key = struct {
+        kind: Symbol.Kind.Tag,
+        index: u32,
+    };
+    var symbol_for_segment = std.AutoArrayHashMap(Key, u32).init(gpa);
     defer symbol_for_segment.deinit();
 
     for (self.symtable) |symbol, symbol_index| {
         switch (symbol.kind) {
-            .data => |data| {
-                const index = data.index orelse continue;
-                try symbol_for_segment.putNoClobber(index, @intCast(u32, symbol_index));
+            .data, .function => {
+                const index = symbol.index() orelse continue;
+                try symbol_for_segment.putNoClobber(
+                    .{ .kind = symbol.kind, .index = index },
+                    @intCast(u32, symbol_index),
+                );
             },
             else => continue,
         }
     }
+    for (self.relocatable_data) |relocatable_data, index| {
+        log.debug("Parsing relocatable data item {d}", .{index});
 
-    for (self.data.segments) |segment, segment_index| {
-        const segment_meta = self.segment_info[segment_index];
-        log.debug("Parsing segment '{s}'", .{segment_meta.name});
-
-        const final_segment_index = try wasm_bin.getMatchingSegment(gpa, object_index, @intCast(u32, segment_index));
+        const final_index = try wasm_bin.getMatchingSegment(gpa, object_index, @intCast(u32, index));
 
         const atom = try Atom.create(gpa);
         errdefer atom.deinit(gpa);
 
         try wasm_bin.managed_atoms.append(gpa, atom);
         atom.file = object_index;
-        atom.size = @intCast(u32, segment.data.len);
-        atom.alignment = if (segment_meta.alignment > 0) @intCast(u32, segment_meta.alignment) else 1;
+        atom.size = relocatable_data.size;
+        atom.alignment = relocatable_data.getAlignment(self);
+        atom.sym_index = symbol_for_segment.get(.{
+            .kind = .data,
+            .index = @intCast(u32, relocatable_data.index),
+        }).?;
 
-        atom.sym_index = symbol_for_segment.get(@intCast(u32, segment_index)).?;
-
-        const relocations: []const wasm.Relocation = self.relocations.get(self.data.index) orelse &.{};
+        const relocations: []const wasm.Relocation = self.relocations.get(relocatable_data.section_index) orelse &.{};
         for (relocations) |relocation| {
-            if (isInbetween(segment.seg_offset, atom.size, relocation.offset)) {
+            if (isInbetween(relocatable_data.offset, atom.size, relocation.offset)) {
                 try atom.relocs.append(gpa, relocation);
             }
         }
 
-        // std.sort.sort(u32, atom.aliases.items, wasm_bin.objects.items[object_index], sort);
-        // atom.sym_index = atom.aliases.swapRemove(0); // alias should never be empty
-        try atom.code.appendSlice(gpa, segment.data);
+        // TODO: Replace `atom.code` from an existing slice to a pointer to the data
+        try atom.code.appendSlice(gpa, relocatable_data.data[0..relocatable_data.size]);
 
-        log.debug("Data count: {d} - index: {d}", .{ wasm_bin.data.count(), final_segment_index });
-        const final_segment: *Wasm.OutputSegment = &wasm_bin.data.entries.items(.value)[final_segment_index];
-        final_segment.alignment = std.math.max(final_segment.alignment, atom.alignment);
-        final_segment.size = std.mem.alignForwardGeneric(
+        const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];
+        segment.alignment = std.math.max(segment.alignment, atom.alignment);
+        segment.size = std.mem.alignForwardGeneric(
             u32,
-            std.mem.alignForwardGeneric(u32, final_segment.size, atom.alignment) + atom.size,
-            final_segment.alignment,
+            std.mem.alignForwardGeneric(u32, segment.size, atom.alignment) + atom.size,
+            segment.alignment,
         );
 
-        if (wasm_bin.atoms.getPtr(final_segment_index)) |last| {
+        if (wasm_bin.atoms.getPtr(final_index)) |last| {
             last.*.next = atom;
             atom.prev = last.*;
             last.* = atom;
         } else {
-            try wasm_bin.atoms.putNoClobber(gpa, final_segment_index, atom);
+            try wasm_bin.atoms.putNoClobber(gpa, final_index, atom);
         }
     }
 }
