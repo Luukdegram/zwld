@@ -22,6 +22,9 @@ relocs: std.ArrayListUnmanaged(wasm.Relocation) = .{},
 code: std.ArrayListUnmanaged(u8) = .{},
 /// For code this is 1, for data this is set to the highest value of all segments
 alignment: u32,
+/// Offset into the section where the atom lives, this already accounts
+/// for alignment.
+offset: u32,
 
 /// Next atom in relation to this atom.
 /// When null, this atom is the last atom
@@ -37,6 +40,7 @@ pub fn create(gpa: *Allocator) !*Atom {
         .alignment = 0,
         .file = undefined,
         .next = null,
+        .offset = 0,
         .prev = null,
         .size = 0,
         .sym_index = 0,
@@ -55,8 +59,13 @@ pub fn deinit(self: *Atom, gpa: *Allocator) void {
 pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
     _ = fmt;
     _ = options;
-    _ = self;
     writer.print("TODO print Atoms", .{});
+    writer.print("Atom{{ .sym_index = {d}, .alignment = {d}, .size = {d}, .offset = 0x{x:0>8} }}", .{
+        self.sym_index,
+        self.alignment,
+        self.size,
+        self.offset,
+    });
 }
 
 /// Returns the first `Atom` from a given atom

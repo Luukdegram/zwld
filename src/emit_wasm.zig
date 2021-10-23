@@ -95,13 +95,14 @@ pub fn emit(wasm: *Wasm) !void {
         try emitSectionHeader(file, offset, .code, wasm.code.items.len);
     }
 
-    if (wasm.data.count() != 0) {
-        log.debug("Writing 'Data' section ({d}", .{wasm.data.count()});
+    if (wasm.data_segments.count() != 0) {
+        const data_count = @intCast(u32, wasm.data_segments.count());
+        log.debug("Writing 'Data' section ({d}", .{data_count});
         const offset = try reserveSectionHeader(file);
-        for (wasm.data.values()) |segment| {
-            try emitSegment(segment, writer);
+        for (wasm.data_segments.values()) |segment_index| {
+            try emitSegment(wasm.segments.items[segment_index], writer);
         }
-        try emitSectionHeader(file, offset, .data, wasm.data.count());
+        try emitSectionHeader(file, offset, .data, data_count);
     }
 }
 
@@ -265,9 +266,9 @@ fn emitElement(element: @import("sections.zig").Elements, writer: anytype) !void
     }
 }
 
-fn emitSegment(segment: Wasm.OutputSegment, writer: anytype) !void {
-    try leb.writeULEB128(writer, segment.memory_index);
-    try emitInitExpression(segment.offset, writer);
+fn emitSegment(segment: Wasm.Segment, writer: anytype) !void {
+    try leb.writeULEB128(writer, @as(u32, 0));
+    try emitInitExpression(.{ .i32_const = @bitCast(i32, segment.offset) }, writer);
     try leb.writeULEB128(writer, segment.size);
     try writer.writeAll(segment.data[0..segment.size]);
 }

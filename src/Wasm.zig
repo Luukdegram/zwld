@@ -191,7 +191,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     }
     try self.mergeImports(gpa);
     try self.setupLinkerSymbols(gpa);
-    // try self.allocateAtoms();
+    try self.allocateAtoms();
     try self.setupMemory();
     try self.mergeSections(gpa);
     try self.mergeTypes(gpa);
@@ -588,23 +588,26 @@ fn allocateAtoms(self: *Wasm) !void {
     var it = self.atoms.iterator();
     while (it.next()) |entry| {
         const segment_index = entry.key_ptr.*;
-        const segment: OutputSegment = self.data.values()[segment_index];
+        const segment: Segment = self.segments.items[segment_index];
         var atom: *Atom = entry.value_ptr.*.getFirst();
 
-        log.debug("Allocating atoms for segment '{s}'", .{self.data.keys()[segment_index]});
+        log.debug("Allocating atoms for segment '{d}'", .{segment_index});
 
-        var offset: u32 = segment.section_offset;
+        var offset: u32 = segment.offset;
         while (true) {
             offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
+            atom.offset = offset;
 
             const object: *Object = &self.objects.items[atom.file];
-            const symbol = &object.symtable[atom.sym_index].kind.data;
-            symbol.offset = offset;
-            symbol.index = segment_index;
-            symbol.size = atom.size;
+            const symbol = &object.symtable[atom.sym_index];
+            symbol.setIndex(segment_index);
+            if (symbol.unwrapAs(.data)) |*data| {
+                data.offset = offset;
+                data.size = atom.size;
+            }
 
             log.debug("Atom '{s}' allocated from 0x{x:8>0} to 0x{x:8>0}", .{
-                object.symtable[atom.sym_index].name,
+                symbol.name,
                 offset,
                 offset + atom.size,
             });
@@ -633,9 +636,7 @@ fn relocateAtoms(self: *Wasm, gpa: *Allocator) !void {
             try atom.resolveRelocs(gpa, self);
 
             // Merge the data into the final segment
-            const object = self.objects.items[atom.file];
-            const symbol: Symbol = object.symtable[atom.sym_index];
-            std.mem.copy(u8, code[symbol.kind.data.offset.?..][0..atom.size], atom.code.items);
+            std.mem.copy(u8, code[atom.offset..][0..atom.size], atom.code.items);
 
             if (atom.next) |next| {
                 atom = next;
