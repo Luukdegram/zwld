@@ -85,14 +85,19 @@ pub fn emit(wasm: *Wasm) !void {
         try emitElement(wasm.elements, writer);
         try emitSectionHeader(file, offset, .element, 1);
     }
-    if (wasm.code.items.len != 0) {
-        log.debug("Writing 'Code' section ({d})", .{wasm.code.items.len});
+    if (wasm.code_section_index) |index| {
+        log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.code.items) |code| {
-            try leb.writeULEB128(writer, @intCast(u32, code.len));
-            try writer.writeAll(code);
+        var atom = wasm.atoms.get(index).?.getFirst();
+        while (true) {
+            try leb.writeULEB128(writer, atom.size);
+            try writer.writeAll(atom.code.items);
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
         }
-        try emitSectionHeader(file, offset, .code, wasm.code.items.len);
+        try emitSectionHeader(file, offset, .code, wasm.functions.count());
     }
 
     if (wasm.data_segments.count() != 0) {

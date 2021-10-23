@@ -59,7 +59,6 @@ pub fn deinit(self: *Atom, gpa: *Allocator) void {
 pub fn format(self: Atom, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
     _ = fmt;
     _ = options;
-    writer.print("TODO print Atoms", .{});
     writer.print("Atom{{ .sym_index = {d}, .alignment = {d}, .size = {d}, .offset = 0x{x:0>8} }}", .{
         self.sym_index,
         self.alignment,
@@ -99,22 +98,45 @@ pub fn resolveRelocs(self: *Atom, gpa: *Allocator, wasm_bin: *Wasm) !void {
                     try wasm_bin.elements.appendSymbol(gpa, rel_symbol);
                 }
                 const index = rel_symbol.getTableIndex() orelse 0;
-                const segment = object.data.segments[symbol.index().?];
-                const offset = reloc.offset - segment.seg_offset - symbol.kind.data.offset.?;
-                log.debug("Relocating '{s}' offset=0x{x:0>8} target=0x{x:0>8} value={d}", .{
+                log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} index={d}", .{
                     rel_symbol.name,
+                    symbol.name,
                     reloc.offset,
-                    offset,
                     index,
                 });
-                std.mem.writeIntLittle(u32, self.code.items[offset..][0..4], index);
+                std.mem.writeIntLittle(u32, self.code.items[reloc.offset..][0..4], index);
+            },
+            .R_WASM_TABLE_INDEX_SLEB => {
+                const index = symbol.kind.function.func.func_idx;
+                log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} index={d}", .{
+                    rel_symbol.name,
+                    symbol.name,
+                    reloc.offset,
+                    index,
+                });
+                leb.writeUnsignedFixed(5, self.code.items[reloc.offset..][0..5], index);
+            },
+            .R_WASM_GLOBAL_INDEX_LEB => {
+                const index = rel_symbol.kind.global.global.global_idx;
+                log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} index={d}", .{
+                    rel_symbol.name,
+                    symbol.name,
+                    reloc.offset,
+                    index,
+                });
+                leb.writeUnsignedFixed(5, self.code.items[reloc.offset..][0..5], index);
+            },
+            .R_WASM_FUNCTION_INDEX_LEB => {
+                const index = rel_symbol.kind.function.functionIndex();
+                log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} index={d}", .{
+                    rel_symbol.name,
+                    symbol.name,
+                    reloc.offset,
+                    index,
+                });
+                leb.writeUnsignedFixed(5, self.code.items[reloc.offset..][0..5], index);
             },
             else => |tag| log.debug("TODO: support relocation type '{s}'", .{@tagName(tag)}),
-        }
-
-        if (rel_symbol.isUndefined() and !rel_symbol.isWeak()) {
-            log.err("Undefined relocation symbol '{s}' for file '{s}'", .{ rel_symbol.name, object.name });
-            return error.UndefinedSymbol;
         }
     }
 }

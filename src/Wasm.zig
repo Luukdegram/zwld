@@ -143,12 +143,16 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.data.values()) |segment| {
         gpa.free(segment.data[0..segment.size]);
     }
+    for (self.segments.items) |segment| {
+        gpa.free(segment.data[0..segment.size]);
+    }
+    self.segments.deinit(gpa);
     for (self.managed_atoms.items) |atom| {
         atom.deinit(gpa);
     }
     self.managed_atoms.deinit(gpa);
     self.atoms.deinit(gpa);
-
+    self.data_segments.deinit(gpa);
     self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
     self.functions.deinit(gpa);
@@ -196,7 +200,6 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.mergeSections(gpa);
     try self.mergeTypes(gpa);
     try self.setupExports(gpa);
-    try self.relocateCode(gpa);
     try self.relocateAtoms(gpa);
 
     try @import("emit_wasm.zig").emit(self);
@@ -409,60 +412,6 @@ const SymbolIterator = struct {
     }
 };
 
-fn relocateCode(self: *Wasm, gpa: *Allocator) !void {
-    log.debug("Merging code sections and performing relocations", .{});
-    // Each function must have its own body
-    try self.code.resize(gpa, self.functions.count());
-    for (self.objects.items) |object| {
-        for (object.code.bodies) |code, body_index| {
-            const body_length = @intCast(u32, code.data.len);
-            // check if we must perform relocations
-            if (object.relocations.get(@intCast(u32, object.code.index))) |relocations| {
-                const _rel: []const wasm.Relocation = relocations;
-                log.debug("Found relocations for function body at index {d}", .{body_index});
-                for (_rel) |rel| {
-                    if (!isInbetween(code.offset, body_length, rel.offset)) {
-                        continue;
-                    }
-                    const symbol: *Symbol = &object.symtable[rel.index];
-                    const body_offset = rel.offset - code.offset;
-                    switch (rel.relocation_type) {
-                        .R_WASM_FUNCTION_INDEX_LEB,
-                        .R_WASM_TABLE_INDEX_SLEB,
-                        => {
-                            log.debug("Performing relocation for function symbol '{s}' at offset=0x{x:0>8}", .{
-                                symbol.name,
-                                rel.offset,
-                            });
-                            // try self.elements.appendSymbol(gpa, symbol);
-
-                            const index = symbol.kind.function.func.func_idx;
-                            leb.writeUnsignedFixed(5, code.data[body_offset..][0..5], index);
-                        },
-                        .R_WASM_GLOBAL_INDEX_LEB => {
-                            log.debug("GLOBAL TY: {s}", .{@tagName(symbol.kind)});
-                            if (symbol.kind != .global) {
-                                try self.globals.addGOTEntry(gpa, symbol, self);
-                            }
-                            const index = symbol.kind.global.global.global_idx;
-                            log.debug("Performing relocation for global symbol '{s}' at offset=0x{x:0>8} body_offset=0x{x:0>8} index=({d})", .{
-                                symbol.name,
-                                rel.offset,
-                                body_offset,
-                                index,
-                            });
-                            leb.writeUnsignedFixed(5, code.data[body_offset..][0..5], index);
-                        },
-                        else => |ty| log.debug("TODO: Relocation for type {s}", .{@tagName(ty)}),
-                    }
-                }
-            }
-            log.debug("Merging code body for {}", .{code.func.func_idx});
-            self.code.items[code.func.func_idx] = code.data;
-        }
-    }
-}
-
 /// Verifies if a given value is in between a minimum -and maximum value.
 /// The maxmimum value is calculated using the length, both start and end are inclusive.
 inline fn isInbetween(min: u32, length: u32, value: u32) bool {
@@ -606,10 +555,11 @@ fn allocateAtoms(self: *Wasm) !void {
                 data.size = atom.size;
             }
 
-            log.debug("Atom '{s}' allocated from 0x{x:8>0} to 0x{x:8>0}", .{
+            log.debug("Atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8} size={d}", .{
                 symbol.name,
                 offset,
                 offset + atom.size,
+                atom.size,
             });
 
             offset += atom.size;
@@ -628,6 +578,7 @@ fn relocateAtoms(self: *Wasm, gpa: *Allocator) !void {
         const segment: *Segment = &self.segments.items[segment_index];
         var atom: *Atom = entry.value_ptr.*.getFirst();
 
+        log.debug("Relocation segment: {d} size=0x{x:0>8}", .{ segment_index, segment.size });
         const code = try gpa.alloc(u8, segment.size);
         std.mem.set(u8, code, 0);
         segment.data = code.ptr;
@@ -637,6 +588,7 @@ fn relocateAtoms(self: *Wasm, gpa: *Allocator) !void {
 
             // Merge the data into the final segment
             std.mem.copy(u8, code[atom.offset..][0..atom.size], atom.code.items);
+            log.debug("Written data from 0x{x:0>8} to 0x{x:0>8}", .{ atom.offset, atom.offset + atom.size });
 
             if (atom.next) |next| {
                 atom = next;

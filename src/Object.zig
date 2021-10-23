@@ -69,7 +69,7 @@ start: ?u32 = null,
 features: []const wasm.Feature = &.{},
 /// A table that maps the relocations we must perform where the key represents
 /// the section that the list of relocations applies to.
-relocations: std.AutoArrayHashMapUnmanaged(u32, []const wasm.Relocation) = .{},
+relocations: std.AutoArrayHashMapUnmanaged(u32, []wasm.Relocation) = .{},
 /// Table of symbols belonging to this Object file
 symtable: []Symbol = &.{},
 /// Extra metadata about the linking section, such as alignment of segments and their name
@@ -103,6 +103,15 @@ const RelocatableData = struct {
         if (self.type != .data) return 1;
         const data_alignment = object.segment_info[self.index].alignment;
         return if (data_alignment > 0) data_alignment else 1;
+    }
+
+    /// Returns the symbol kind that corresponds to the relocatable section
+    pub fn getSymbolKind(self: RelocatableData) Symbol.Kind.Tag {
+        return switch (self.type) {
+            .data => .data,
+            .code => .function,
+            .custom => .section,
+        };
     }
 };
 
@@ -472,6 +481,14 @@ fn Parser(comptime ReaderType: type) type {
                                 .offset = @intCast(u32, start - reader.context.bytes_left),
                             };
                             try reader.readNoEof(code.data);
+                            try relocatable_data.append(.{
+                                .type = .code,
+                                .data = code.data.ptr,
+                                .size = code_len,
+                                .index = @intCast(u32, self.object.importedCountByKind(.function) + index),
+                                .offset = code.offset,
+                                .section_index = self.object.code.index,
+                            });
                         }
                     },
                     .data => {
@@ -497,7 +514,6 @@ fn Parser(comptime ReaderType: type) type {
                     },
                     else => try self.reader.reader().skipBytes(len, .{}),
                 }
-                if (byte != 0x00) {} else {}
             } else |err| switch (err) {
                 error.EndOfStream => {}, // finished parsing the file
                 else => |e| return e,
@@ -842,8 +858,8 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
 
     for (self.symtable) |symbol, symbol_index| {
         switch (symbol.kind) {
-            .data, .function => {
-                const index = symbol.index() orelse continue;
+            .data, .function => if (!symbol.isUndefined()) {
+                const index = symbol.index().?;
                 try symbol_for_segment.putNoClobber(
                     .{ .kind = symbol.kind, .index = index },
                     @intCast(u32, symbol_index),
@@ -853,8 +869,6 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
         }
     }
     for (self.relocatable_data) |relocatable_data, index| {
-        log.debug("Parsing relocatable data item {d}", .{index});
-
         const final_index = try wasm_bin.getMatchingSegment(gpa, object_index, @intCast(u32, index));
 
         const atom = try Atom.create(gpa);
@@ -865,14 +879,17 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
         atom.size = relocatable_data.size;
         atom.alignment = relocatable_data.getAlignment(self);
         atom.sym_index = symbol_for_segment.get(.{
-            .kind = .data,
+            .kind = relocatable_data.getSymbolKind(),
             .index = @intCast(u32, relocatable_data.index),
         }).?;
 
-        const relocations: []const wasm.Relocation = self.relocations.get(relocatable_data.section_index) orelse &.{};
-        for (relocations) |relocation| {
+        const relocations: []wasm.Relocation = self.relocations.get(relocatable_data.section_index) orelse &.{};
+        for (relocations) |*relocation| {
             if (isInbetween(relocatable_data.offset, atom.size, relocation.offset)) {
-                try atom.relocs.append(gpa, relocation);
+                // set the offset relative to the offset of the segment itself,
+                // rather than within the entire section.
+                relocation.offset -= relocatable_data.offset;
+                try atom.relocs.append(gpa, relocation.*);
             }
         }
 
@@ -894,22 +911,8 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
         } else {
             try wasm_bin.atoms.putNoClobber(gpa, final_index, atom);
         }
+        log.debug("Parsed into atom: '{s}'", .{self.symtable[atom.sym_index].name});
     }
-}
-
-/// Compares 2 symbols and returns true when the lhs symbol
-/// has a higher seniority than rhs.
-fn sort(object: Object, lhs: u32, rhs: u32) bool {
-    const lhs_sym = object.symtable[lhs];
-    const rhs_sym = object.symtable[rhs];
-
-    const lhs_binding = lhs_sym.flags & @enumToInt(Symbol.Flag.WASM_SYM_BINDING_MASK);
-    const rhs_binding = rhs_sym.flags & @enumToInt(Symbol.Flag.WASM_SYM_BINDING_MASK);
-
-    if (lhs_binding == rhs_binding) return false;
-    if (lhs_sym.isGlobal()) return true;
-    if (lhs_sym.isWeak() and rhs_sym.isLocal()) return true;
-    return false;
 }
 
 /// Verifies if a given value is in between a minimum -and maximum value.
