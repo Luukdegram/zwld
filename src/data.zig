@@ -248,7 +248,8 @@ pub const Relocation = struct {
 
     /// All possible relocation types currently existing.
     /// This enum is exhaustive as the spec is WIP and new types
-    /// can be added but we do not want to have this result in compile errors.
+    /// can be added which means that a generated binary will be invalid,
+    /// so instead we will show an error in such cases.
     pub const RelocationType = enum(u8) {
         R_WASM_FUNCTION_INDEX_LEB = 0,
         R_WASM_TABLE_INDEX_SLEB = 1,
@@ -268,7 +269,6 @@ pub const Relocation = struct {
         R_WASM_TABLE_INDEX_SLEB64 = 18,
         R_WASM_TABLE_INDEX_I64 = 19,
         R_WASM_TABLE_NUMBER_LEB = 20,
-        _,
 
         /// Returns true for relocation types where the `addend` field is present.
         pub fn addendIsPresent(self: RelocationType) bool {

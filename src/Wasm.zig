@@ -170,7 +170,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     try self.mergeSections(gpa);
     try self.mergeTypes(gpa);
     try self.setupExports(gpa);
-    try self.relocateAtoms(gpa);
+    try self.relocateAtoms();
 
     try @import("emit_wasm.zig").emit(self);
 }
@@ -542,13 +542,13 @@ fn allocateAtoms(self: *Wasm) !void {
     }
 }
 
-fn relocateAtoms(self: *Wasm, gpa: *Allocator) !void {
+fn relocateAtoms(self: *Wasm) !void {
     var it = self.atoms.valueIterator();
     while (it.next()) |next_atom| {
         var atom: *Atom = next_atom.*.getFirst();
         while (true) {
             // First perform relocations to rewrite the binary data
-            try atom.resolveRelocs(gpa, self);
+            try atom.resolveRelocs(self);
             if (atom.next) |next| {
                 atom = next;
             } else break;

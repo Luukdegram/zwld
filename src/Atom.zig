@@ -81,7 +81,9 @@ pub fn getLast(self: *Atom) *Atom {
     return tmp;
 }
 
-pub fn resolveRelocs(self: *Atom, gpa: *Allocator, wasm_bin: *Wasm) !void {
+/// Resolves the relocations within the atom, writing the new value
+/// at the calculated offset.
+pub fn resolveRelocs(self: *Atom, wasm_bin: *const Wasm) !void {
     const object = wasm_bin.objects.items[self.file];
     const symbol: Symbol = object.symtable[self.sym_index];
 
@@ -91,54 +93,71 @@ pub fn resolveRelocs(self: *Atom, gpa: *Allocator, wasm_bin: *Wasm) !void {
     });
 
     for (self.relocs.items) |reloc| {
-        const rel_symbol: *Symbol = &object.symtable[reloc.index];
+        const value = self.relocationValue(reloc, wasm_bin);
+        log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} value={d}", .{
+            object.symtable[reloc.index].name,
+            symbol.name,
+            reloc.offset,
+            value,
+        });
+
         switch (reloc.relocation_type) {
-            .R_WASM_TABLE_INDEX_I32 => {
-                if (!requiresGOTAccess(wasm_bin, rel_symbol.*)) {
-                    try wasm_bin.elements.appendSymbol(gpa, rel_symbol);
-                }
-                const index = rel_symbol.getTableIndex() orelse 0;
-                log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} index={d}", .{
-                    rel_symbol.name,
-                    symbol.name,
-                    reloc.offset,
-                    index,
-                });
-                std.mem.writeIntLittle(u32, self.code.items[reloc.offset..][0..4], index);
-            },
-            .R_WASM_TABLE_INDEX_SLEB => {
-                const index = symbol.kind.function.func.func_idx;
-                log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} index={d}", .{
-                    rel_symbol.name,
-                    symbol.name,
-                    reloc.offset,
-                    index,
-                });
-                leb.writeUnsignedFixed(5, self.code.items[reloc.offset..][0..5], index);
-            },
-            .R_WASM_GLOBAL_INDEX_LEB => {
-                const index = rel_symbol.kind.global.global.global_idx;
-                log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} index={d}", .{
-                    rel_symbol.name,
-                    symbol.name,
-                    reloc.offset,
-                    index,
-                });
-                leb.writeUnsignedFixed(5, self.code.items[reloc.offset..][0..5], index);
-            },
-            .R_WASM_FUNCTION_INDEX_LEB => {
-                const index = rel_symbol.kind.function.functionIndex();
-                log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} index={d}", .{
-                    rel_symbol.name,
-                    symbol.name,
-                    reloc.offset,
-                    index,
-                });
-                leb.writeUnsignedFixed(5, self.code.items[reloc.offset..][0..5], index);
-            },
-            else => |tag| log.debug("TODO: support relocation type '{s}'", .{@tagName(tag)}),
+            .R_WASM_TABLE_INDEX_I32,
+            .R_WASM_FUNCTION_OFFSET_I32,
+            .R_WASM_GLOBAL_INDEX_I32,
+            .R_WASM_MEMORY_ADDR_I32,
+            .R_WASM_SECTION_OFFSET_I32,
+            => std.mem.writeIntLittle(u32, self.code.items[reloc.offset..][0..4], @intCast(u32, value)),
+            .R_WASM_TABLE_INDEX_I64,
+            .R_WASM_MEMORY_ADDR_I64,
+            => std.mem.writeIntLittle(u64, self.code.items[reloc.offset..][0..8], value),
+            .R_WASM_GLOBAL_INDEX_LEB,
+            .R_WASM_EVENT_INDEX_LEB,
+            .R_WASM_FUNCTION_INDEX_LEB,
+            .R_WASM_MEMORY_ADDR_LEB,
+            .R_WASM_MEMORY_ADDR_SLEB,
+            .R_WASM_TABLE_INDEX_SLEB,
+            .R_WASM_TABLE_NUMBER_LEB,
+            .R_WASM_TYPE_INDEX_LEB,
+            => leb.writeUnsignedFixed(5, self.code.items[reloc.offset..][0..5], @intCast(u32, value)),
+            .R_WASM_MEMORY_ADDR_LEB64,
+            .R_WASM_MEMORY_ADDR_SLEB64,
+            .R_WASM_TABLE_INDEX_SLEB64,
+            => leb.writeUnsignedFixed(10, self.code.items[reloc.offset..][0..10], value),
         }
     }
+}
+
+/// From a given `relocation` will return the new value to be written.
+/// All values will be represented as a `u64` as all values can fit within it.
+/// The final value must be casted to the correct size.
+fn relocationValue(self: *Atom, relocation: wasm.Relocation, wasm_bin: *const Wasm) u64 {
+    const object = wasm_bin.objects.items[self.file];
+    const symbol: Symbol = object.symtable[relocation.index];
+    return switch (relocation.relocation_type) {
+        .R_WASM_FUNCTION_INDEX_LEB => symbol.kind.function.functionIndex(),
+        .R_WASM_TABLE_NUMBER_LEB => symbol.kind.table.table.table_idx,
+        .R_WASM_TABLE_INDEX_I32,
+        .R_WASM_TABLE_INDEX_I64,
+        .R_WASM_TABLE_INDEX_SLEB,
+        .R_WASM_TABLE_INDEX_SLEB64,
+        => symbol.getTableIndex() orelse 0,
+        .R_WASM_TYPE_INDEX_LEB => symbol.kind.function.func.type_idx,
+        .R_WASM_GLOBAL_INDEX_I32,
+        .R_WASM_GLOBAL_INDEX_LEB,
+        => symbol.kind.global.global.global_idx,
+        .R_WASM_MEMORY_ADDR_I32,
+        .R_WASM_MEMORY_ADDR_I64,
+        .R_WASM_MEMORY_ADDR_LEB,
+        .R_WASM_MEMORY_ADDR_LEB64,
+        .R_WASM_MEMORY_ADDR_SLEB,
+        .R_WASM_MEMORY_ADDR_SLEB64,
+        => relocation.offset + (relocation.addend orelse 0),
+        .R_WASM_EVENT_INDEX_LEB => symbol.kind.event.index,
+        .R_WASM_SECTION_OFFSET_I32,
+        .R_WASM_FUNCTION_OFFSET_I32,
+        => relocation.offset,
+    };
 }
 
 /// Determines if a given symbol requires access to the global offset table

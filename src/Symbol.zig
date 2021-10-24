@@ -123,7 +123,7 @@ pub fn setTableIndex(self: *Symbol, table_index: u32) void {
 
 /// Returns the table index of the symbol.
 /// Asserts the given symbol is a function symbol.
-pub fn getTableIndex(self: *Symbol) ?u32 {
+pub fn getTableIndex(self: Symbol) ?u32 {
     return self.kind.function.table_index;
 }
 
