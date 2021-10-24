@@ -25,9 +25,6 @@ arena: std.heap.ArenaAllocator.State = .{},
 file: ?std.fs.File = null,
 /// Name (read path) of the object file.
 name: []const u8,
-/// A list of all sections this module contains.
-/// This contains metadata such as offset, size, type and the contents in bytes.
-sections: []const wasm.Section = &.{},
 /// Parsed type section
 types: []const wasm.FuncType = &.{},
 /// A list of all imports for this module
@@ -44,21 +41,6 @@ globals: []wasm.Global = &.{},
 exports: []const wasm.Export = &.{},
 /// Parsed element section
 elements: []const wasm.Element = &.{},
-/// Parsed code section
-code: struct {
-    /// Index of the section in the module
-    index: u32,
-    /// Function bodies containing the bytes
-    /// and a pointer to the actual function.
-    bodies: []wasm.Code,
-} = .{ .bodies = &.{}, .index = undefined },
-/// Parsed data section
-data: struct {
-    /// Index of this section within the module
-    index: u32,
-    /// All data segments
-    segments: []const wasm.Data = &.{},
-} = .{ .index = undefined, .segments = &.{} },
 /// Represents the function ID that must be called on startup.
 /// This is `null` by default as runtimes may determine the startup
 /// function themselves. This is essentially legacy.
@@ -290,8 +272,6 @@ fn Parser(comptime ReaderType: type) type {
         reader: std.io.CountingReader(ReaderType),
         /// Object file we're building
         object: *Object,
-        /// The currently parsed sections
-        sections: std.ArrayListUnmanaged(wasm.Section) = .{},
 
         fn init(object: *Object, reader: ReaderType) Self {
             return .{ .object = object, .reader = std.io.countingReader(reader) };
@@ -316,17 +296,10 @@ fn Parser(comptime ReaderType: type) type {
             var relocatable_data = std.ArrayList(RelocatableData).init(gpa);
             defer relocatable_data.deinit();
 
-            while (self.reader.reader().readByte()) |byte| {
+            var section_index: u32 = 0;
+            while (self.reader.reader().readByte()) |byte| : (section_index += 1) {
                 const len = try readLeb(u32, self.reader.reader());
-                try self.sections.append(gpa, .{
-                    .offset = self.reader.bytes_read,
-                    .size = len,
-                    .section_kind = @intToEnum(wasm.SectionType, byte),
-                });
                 const reader = std.io.limitedReader(self.reader.reader(), len).reader();
-
-                // We only parse extra information when it's a custom section
-                // or an import section. All other sections we simply skip till the end.
                 switch (@intToEnum(wasm.SectionType, byte)) {
                     .custom => {
                         const name_len = try readLeb(u32, reader);
@@ -472,43 +445,43 @@ fn Parser(comptime ReaderType: type) type {
                     },
                     .code => {
                         var start = reader.context.bytes_left;
-                        self.object.code.index = @intCast(u32, self.sections.items.len - 1);
-                        for (try readVec(&self.object.code.bodies, reader, gpa)) |*code, index| {
+                        var index: u32 = 0;
+                        const count = try readLeb(u32, reader);
+                        while (index < count) : (index += 1) {
                             const code_len = try readLeb(u32, reader);
-                            code.* = .{
-                                .data = try gpa.alloc(u8, code_len),
-                                .func = &self.object.functions[index],
-                                .offset = @intCast(u32, start - reader.context.bytes_left),
-                            };
-                            try reader.readNoEof(code.data);
+                            const offset = @intCast(u32, start - reader.context.bytes_left);
+                            const data = try gpa.alloc(u8, code_len);
+                            try reader.readNoEof(data);
                             try relocatable_data.append(.{
                                 .type = .code,
-                                .data = code.data.ptr,
+                                .data = data.ptr,
                                 .size = code_len,
-                                .index = @intCast(u32, self.object.importedCountByKind(.function) + index),
-                                .offset = code.offset,
-                                .section_index = self.object.code.index,
+                                .index = self.object.importedCountByKind(.function) + index,
+                                .offset = offset,
+                                .section_index = section_index,
                             });
                         }
                     },
                     .data => {
                         var start = reader.context.bytes_left;
-                        self.object.data.index = @intCast(u32, self.sections.items.len - 1);
-                        for (try readVec(&self.object.data.segments, reader, gpa)) |*segment, index| {
-                            segment.index = try readLeb(u32, reader);
-                            segment.offset = try readInit(reader);
+                        var index: u32 = 0;
+                        const count = try readLeb(u32, reader);
+                        while (index < count) : (index += 1) {
+                            const flags = try readLeb(u32, reader);
+                            const data_offset = try readInit(reader);
+                            _ = flags; // TODO: Do we need to check flags to detect passive/active memory?
+                            _ = data_offset;
                             const data_len = try readLeb(u32, reader);
-                            segment.seg_offset = @intCast(u32, start - reader.context.bytes_left);
+                            const offset = @intCast(u32, start - reader.context.bytes_left);
                             const data = try gpa.alloc(u8, data_len);
                             try reader.readNoEof(data);
-                            segment.data = data;
                             try relocatable_data.append(.{
                                 .type = .data,
                                 .data = data.ptr,
                                 .size = data_len,
-                                .index = @intCast(u32, index),
-                                .offset = segment.seg_offset,
-                                .section_index = self.object.data.index,
+                                .index = index,
+                                .offset = offset,
+                                .section_index = section_index,
                             });
                         }
                     },
@@ -518,7 +491,6 @@ fn Parser(comptime ReaderType: type) type {
                 error.EndOfStream => {}, // finished parsing the file
                 else => |e| return e,
             }
-            self.object.sections = self.sections.toOwnedSlice(gpa);
             self.object.relocatable_data = relocatable_data.toOwnedSlice();
         }
 
@@ -554,10 +526,9 @@ fn Parser(comptime ReaderType: type) type {
             const count = try leb.readULEB128(u32, reader);
             const relocations = try gpa.alloc(wasm.Relocation, count);
 
-            log.debug("Found {d} relocations for section ({d}): {s}", .{
+            log.debug("Found {d} relocations for section ({d})", .{
                 count,
                 section,
-                @tagName(self.sections.items[section].section_kind),
             });
 
             for (relocations) |*relocation| {
