@@ -63,7 +63,6 @@ pub const Segment = struct {
     alignment: u32,
     size: u32,
     offset: u32,
-    data: [*]u8,
 };
 
 pub const SymbolWithLoc = struct {
@@ -119,16 +118,13 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.global_symbols.keys()) |name| {
         gpa.free(name);
     }
-    for (self.segments.items) |segment| {
-        gpa.free(segment.data[0..segment.size]);
-    }
-    self.segments.deinit(gpa);
     for (self.managed_atoms.items) |atom| {
         atom.deinit(gpa);
     }
     self.managed_atoms.deinit(gpa);
     self.atoms.deinit(gpa);
     self.data_segments.deinit(gpa);
+    self.segments.deinit(gpa);
     self.global_symbols.deinit(gpa);
     self.objects.deinit(gpa);
     self.functions.deinit(gpa);
@@ -491,7 +487,6 @@ pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, reloc
                     .alignment = 1,
                     .size = 0,
                     .offset = 0,
-                    .data = undefined,
                 });
                 return index;
             } else return result.value_ptr.*;
@@ -502,7 +497,6 @@ pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, reloc
                 .alignment = 1,
                 .size = 0,
                 .offset = 0,
-                .data = undefined,
             });
             break :blk index;
         },
@@ -549,24 +543,12 @@ fn allocateAtoms(self: *Wasm) !void {
 }
 
 fn relocateAtoms(self: *Wasm, gpa: *Allocator) !void {
-    var it = self.atoms.iterator();
-    while (it.next()) |entry| {
-        const segment_index = entry.key_ptr.*;
-        const segment: *Segment = &self.segments.items[segment_index];
-        var atom: *Atom = entry.value_ptr.*.getFirst();
-
-        log.debug("Relocation segment: {d} size=0x{x:0>8}", .{ segment_index, segment.size });
-        const code = try gpa.alloc(u8, segment.size);
-        std.mem.set(u8, code, 0);
-        segment.data = code.ptr;
+    var it = self.atoms.valueIterator();
+    while (it.next()) |next_atom| {
+        var atom: *Atom = next_atom.*.getFirst();
         while (true) {
             // First perform relocations to rewrite the binary data
             try atom.resolveRelocs(gpa, self);
-
-            // Merge the data into the final segment
-            std.mem.copy(u8, code[atom.offset..][0..atom.size], atom.code.items);
-            log.debug("Written data from 0x{x:0>8} to 0x{x:0>8}", .{ atom.offset, atom.offset + atom.size });
-
             if (atom.next) |next| {
                 atom = next;
             } else break;

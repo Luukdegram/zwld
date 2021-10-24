@@ -102,12 +102,45 @@ pub fn emit(wasm: *Wasm) !void {
 
     if (wasm.data_segments.count() != 0) {
         const data_count = @intCast(u32, wasm.data_segments.count());
-        log.debug("Writing 'Data' section ({d}", .{data_count});
+        log.debug("Writing 'Data' section ({d})", .{data_count});
         const offset = try reserveSectionHeader(file);
         const base_offset = wasm.options.global_base orelse 1024;
-        for (wasm.data_segments.values()) |segment_index| {
-            try emitSegment(wasm.segments.items[segment_index], base_offset, writer);
+
+        for (wasm.data_segments.values()) |atom_index| {
+            var atom = wasm.atoms.getPtr(atom_index).?.*.getFirst();
+            const segment = wasm.segments.items[atom_index];
+            const segment_offset = base_offset + segment.offset;
+
+            try leb.writeULEB128(writer, @as(u32, 0)); // flag and memory index (always 0);
+            try emitInitExpression(.{ .i32_const = @bitCast(i32, segment_offset) }, writer);
+            try leb.writeULEB128(writer, segment.size);
+
+            var current_offset: u32 = 0;
+            while (true) {
+                // TODO: Verify if this is faster than allocating segment's size
+                // Setting all zeroes, memcopy all segments and then writing.
+                if (current_offset != atom.offset) {
+                    const diff = atom.offset - current_offset;
+                    try writer.writeByteNTimes(0, diff);
+                    current_offset += diff;
+                }
+                std.debug.assert(current_offset == atom.offset);
+                try writer.writeAll(atom.code.items);
+                std.debug.assert(atom.code.items.len == atom.size);
+
+                current_offset += atom.size;
+                if (atom.next) |next| {
+                    atom = next;
+                } else {
+                    // Also make sure that if the last atom has extra bytes, we write 0's.
+                    if (current_offset != segment.size) {
+                        try writer.writeByteNTimes(0, segment.size - current_offset);
+                    }
+                    break;
+                }
+            }
         }
+
         try emitSectionHeader(file, offset, .data, data_count);
     }
 }
@@ -270,11 +303,4 @@ fn emitElement(element: @import("sections.zig").Elements, writer: anytype) !void
         std.debug.assert(symbol.kind.function.table_index.? == el_index);
         try leb.writeULEB128(writer, symbol.kind.function.functionIndex());
     }
-}
-
-fn emitSegment(segment: Wasm.Segment, base_offset: u32, writer: anytype) !void {
-    try leb.writeULEB128(writer, @as(u32, 0));
-    try emitInitExpression(.{ .i32_const = @bitCast(i32, base_offset + segment.offset) }, writer);
-    try leb.writeULEB128(writer, segment.size);
-    try writer.writeAll(segment.data[0..segment.size]);
 }
