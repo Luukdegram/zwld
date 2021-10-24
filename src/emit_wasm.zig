@@ -104,8 +104,9 @@ pub fn emit(wasm: *Wasm) !void {
         const data_count = @intCast(u32, wasm.data_segments.count());
         log.debug("Writing 'Data' section ({d}", .{data_count});
         const offset = try reserveSectionHeader(file);
+        const base_offset = wasm.options.global_base orelse 1024;
         for (wasm.data_segments.values()) |segment_index| {
-            try emitSegment(wasm.segments.items[segment_index], writer);
+            try emitSegment(wasm.segments.items[segment_index], base_offset, writer);
         }
         try emitSectionHeader(file, offset, .data, data_count);
     }
@@ -271,9 +272,9 @@ fn emitElement(element: @import("sections.zig").Elements, writer: anytype) !void
     }
 }
 
-fn emitSegment(segment: Wasm.Segment, writer: anytype) !void {
+fn emitSegment(segment: Wasm.Segment, base_offset: u32, writer: anytype) !void {
     try leb.writeULEB128(writer, @as(u32, 0));
-    try emitInitExpression(.{ .i32_const = @bitCast(i32, segment.offset) }, writer);
+    try emitInitExpression(.{ .i32_const = @bitCast(i32, base_offset + segment.offset) }, writer);
     try leb.writeULEB128(writer, segment.size);
     try writer.writeAll(segment.data[0..segment.size]);
 }

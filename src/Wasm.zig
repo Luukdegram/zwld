@@ -49,10 +49,7 @@ globals: sections.Globals = .{},
 exports: sections.Exports = .{},
 /// Output element section
 elements: sections.Elements = .{},
-/// Output code section
-code: std.ArrayListUnmanaged([]u8) = .{},
 /// Output data section, keyed by the segment name
-data: std.StringArrayHashMapUnmanaged(OutputSegment) = .{},
 /// Represents non-synthetic section entries
 /// Used for code, data and custom sections.
 segments: std.ArrayListUnmanaged(Segment) = .{},
@@ -72,24 +69,6 @@ pub const Segment = struct {
 pub const SymbolWithLoc = struct {
     sym_index: u32,
     file: u16,
-};
-
-/// Represents a single segment within the data section
-pub const OutputSegment = struct {
-    /// Index of linear memory
-    memory_index: u32,
-    /// Where the segment's data within the entire data section starts
-    offset: wasm.InitExpression,
-    /// The actual data living in this segment
-    data: [*]u8,
-    /// Segment's alignment
-    alignment: u32,
-    /// The size of the segment
-    size: u32,
-    /// The index of this segment into the data section
-    segment_index: u32,
-    /// Offset into the data section
-    section_offset: u32,
 };
 
 /// Options to pass to our linker which affects
@@ -140,9 +119,6 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.global_symbols.keys()) |name| {
         gpa.free(name);
     }
-    for (self.data.values()) |segment| {
-        gpa.free(segment.data[0..segment.size]);
-    }
     for (self.segments.items) |segment| {
         gpa.free(segment.data[0..segment.size]);
     }
@@ -162,8 +138,6 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     self.exports.deinit(gpa);
     self.elements.deinit(gpa);
     self.tables.deinit(gpa);
-    self.code.deinit(gpa);
-    self.data.deinit(gpa);
     self.file.close();
     self.* = undefined;
 }
@@ -438,9 +412,12 @@ fn setupMemory(self: *Wasm) !void {
     var memory_ptr: u32 = self.options.global_base orelse 1024;
     memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
 
-    for (self.data.values()) |*segment| {
+    for (self.segments.items) |*segment, i| {
+        // skip 'code' segments
+        if (self.code_section_index) |index| {
+            if (index == i) continue;
+        }
         memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, @as(u32, 1) << @intCast(u5, segment.alignment));
-        segment.offset.i32_const = @bitCast(i32, memory_ptr);
         memory_ptr += segment.size;
     }
 
