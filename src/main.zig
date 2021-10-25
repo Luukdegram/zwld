@@ -91,7 +91,7 @@ pub fn main() !void {
             import_memory = true;
             continue;
         }
-        if (mem.eql(u8, arg, "--import_table")) {
+        if (mem.eql(u8, arg, "--import-table")) {
             import_table = true;
             continue;
         }

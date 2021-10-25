@@ -28,17 +28,26 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .type, wasm.types.count());
     }
-    if (wasm.imports.symbolCount() != 0) {
-        log.debug("Writing 'Imports' section ({d})", .{wasm.imports.symbolCount()});
+    if (wasm.imports.symbolCount() != 0 or wasm.options.import_memory) {
+        const count = wasm.imports.symbolCount() + @boolToInt(wasm.options.import_memory);
+        log.debug("Writing 'Imports' section ({d})", .{count});
         const offset = try reserveSectionHeader(file);
+
+        if (wasm.options.import_memory) {
+            const mem_import: data.Import = .{
+                .module_name = "env",
+                .name = "memory",
+                .kind = .{ .memory = wasm.memories.limits },
+            };
+            try emitImport(mem_import, writer);
+        }
 
         for (wasm.imports.symbols()) |symbol| {
             try emitImportSymbol(symbol.*, writer);
         }
 
-        // TODO: Also emit GOT symbols and memory if the CLI option was provided
-
-        try emitSectionHeader(file, offset, .import, wasm.imports.symbolCount());
+        // TODO: Also emit GOT symbols
+        try emitSectionHeader(file, offset, .import, count);
     }
     if (wasm.functions.count() != 0) {
         log.debug("Writing 'Functions' section ({d})", .{wasm.functions.count()});

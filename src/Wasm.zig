@@ -389,6 +389,11 @@ fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
             }
         }
     }
+    if (self.options.import_table) {
+        if (Symbol.linker_defined.indirect_function_table) |existing_table| {
+            try self.imports.appendSymbol(gpa, existing_table);
+        }
+    }
 }
 
 /// Sets up the memory section of the wasm module, as well as the stack.
