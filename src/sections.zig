@@ -389,11 +389,6 @@ pub const Elements = struct {
         try self.indirect_functions.append(gpa, symbol);
     }
 
-    /// Returns true when this section must be written to the binary
-    pub fn mustEmit(self: Elements) bool {
-        return self.indirect_functions.items.len != 0;
-    }
-
     pub fn functionCount(self: Elements) u32 {
         return @intCast(u32, self.indirect_functions.items.len);
     }

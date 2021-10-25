@@ -49,6 +49,8 @@ globals: sections.Globals = .{},
 exports: sections.Exports = .{},
 /// Output element section
 elements: sections.Elements = .{},
+/// Index to a function defining the entry of the wasm file
+entry: ?u32 = null,
 /// Output data section, keyed by the segment name
 /// Represents non-synthetic section entries
 /// Used for code, data and custom sections.
@@ -161,6 +163,7 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     for (self.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
     }
+    try self.setupStart();
     try self.mergeImports(gpa);
     try self.setupLinkerSymbols(gpa);
     try self.allocateAtoms();
@@ -367,6 +370,7 @@ const SymbolIterator = struct {
         const object: *Object = &self.wasm.objects.items[self.file_index];
         if (self.symbol_index >= object.symtable.len) {
             self.file_index += 1;
+            self.symbol_index = 0;
             return self.next();
         }
 
@@ -556,4 +560,25 @@ fn relocateAtoms(self: *Wasm) !void {
             } else break;
         }
     }
+}
+
+fn setupStart(self: *Wasm) !void {
+    if (self.options.no_entry) return;
+    const entry_name = self.options.entry_name orelse "_start";
+
+    const symbol_with_loc: SymbolWithLoc = self.global_symbols.get(entry_name) orelse {
+        log.err("Entry symbol '{s}' does not exist, use '--no-entry' to suppress", .{entry_name});
+        return error.MissingSymbol;
+    };
+    const object = self.objects.items[symbol_with_loc.file];
+    const symbol: *Symbol = &object.symtable[symbol_with_loc.sym_index];
+
+    if (symbol.kind != .function) {
+        log.err("Entry symbol '{s}' is not a function", .{entry_name});
+        return error.InvalidEntryKind;
+    }
+    // Simply export the symbol as the start function is reserved
+    // for synthetic symbols such as __wasm_start, __wasm_init_memory, and
+    // __wasm_apply_global_relocs
+    symbol.setFlag(.WASM_SYM_EXPORTED);
 }

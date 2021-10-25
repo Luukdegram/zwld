@@ -87,8 +87,13 @@ pub fn emit(wasm: *Wasm) !void {
         }
         try emitSectionHeader(file, offset, .@"export", wasm.exports.count());
     }
-    log.debug("TODO: Start section", .{});
-    if (wasm.elements.mustEmit()) {
+
+    if (wasm.entry) |entry_index| {
+        const offset = try reserveSectionHeader(file);
+        try emitSectionHeader(file, offset, .start, entry_index);
+    }
+
+    if (wasm.elements.functionCount() != 0) {
         log.debug("Writing 'Element' section (1)", .{});
         const offset = try reserveSectionHeader(file);
         try emitElement(wasm.elements, writer);

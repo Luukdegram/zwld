@@ -74,7 +74,7 @@ pub fn main() !void {
             printHelpAndExit();
         }
         if (mem.eql(u8, arg, "--entry")) {
-            if (i + 1 > args.len) printErrorAndExit("Missing entry name argument", .{});
+            if (i + 1 >= args.len) printErrorAndExit("Missing entry name argument", .{});
             entry_name = args[i + 1];
             i += 1;
             continue;

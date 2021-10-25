@@ -214,11 +214,8 @@ pub fn isNoStrip(self: Symbol) bool {
 }
 
 pub fn isExported(self: Symbol) bool {
-    if (self.hasFlag(.WASM_SYM_EXPORTED)) return true;
-    if (self.isUndefined()) return false;
-    if (self.isHidden()) return false;
-    if (self.isDefined() and self.isGlobal()) return true;
-    return false;
+    if (self.isUndefined() or self.isLocal()) return false;
+    return self.hasFlag(.WASM_SYM_EXPORTED);
 }
 
 pub fn isWeak(self: Symbol) bool {
