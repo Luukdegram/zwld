@@ -18,6 +18,7 @@ Options:
 -h, --help                         Print this help and exit
 -o [path]                          Output path of the binary
 --entry <entry>                    Name of entry point symbol
+--global-base=<value>              Value from where the global data will start
 --import-memory                    Import memory from the host environment
 --import-table                     Import function table from the host environment
 --initial-memory=<value>           Initial size of the linear memory
@@ -25,6 +26,7 @@ Options:
 --merge-data-segments              Enable merging data segments
 --no-entry                         Do not output any entry point
 --stack-first                      Place stack at start of linear memory instead of after data
+--stack-size=<value>               Specifies the stack size in bytes
 ```
 
 ## Building

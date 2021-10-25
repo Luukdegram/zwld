@@ -336,7 +336,7 @@ pub const Segment = struct {
         } else if (std.mem.startsWith(u8, self.name, ".bss.")) {
             return ".bss";
         }
-        unreachable;
+        return self.name;
     }
 };
 

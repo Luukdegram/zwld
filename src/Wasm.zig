@@ -75,6 +75,8 @@ pub const SymbolWithLoc = struct {
 pub const Options = struct {
     /// When the entry name is different than `_start`
     entry_name: ?[]const u8 = null,
+    /// Points to where the global data will start
+    global_base: ?u32 = null,
     /// Tells the linker we will import memory from the host environment
     import_memory: bool = false,
     /// Tells the linker we will import the function table from the host environment
@@ -87,13 +89,14 @@ pub const Options = struct {
     /// or when the initial memory calculated by the linker is larger than the given maximum memory.
     max_memory: ?u32 = null,
     /// Tell the linker to merge data segments
-    merge_data_segments: bool = false,
+    /// i.e. all '.rodata' will be merged into a .rodata segment.
+    merge_data_segments: bool = true,
     /// Tell the linker we do not require a starting entry
     no_entry: bool = false,
     /// Tell the linker to put the stack first, instead of after the data
     stack_first: bool = false,
-    /// Points to where the global data will start
-    global_base: ?u32 = null,
+    /// Specifies the size of the stack in bytes
+    stack_size: ?u32 = null,
 };
 
 /// Initializes a new wasm binary file at the given path.
@@ -140,11 +143,6 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
 
 /// Parses objects from the given paths as well as append them to `self`
 pub fn addObjects(self: *Wasm, gpa: *Allocator, file_paths: []const []const u8) !void {
-    errdefer for (self.objects.items) |*object| {
-        object.file.?.close();
-        object.deinit(gpa);
-    } else self.objects.deinit(gpa);
-
     for (file_paths) |path| {
         const file = try fs.cwd().openFile(path, .{});
         errdefer file.close();
@@ -382,12 +380,6 @@ const SymbolIterator = struct {
     }
 };
 
-/// Verifies if a given value is in between a minimum -and maximum value.
-/// The maxmimum value is calculated using the length, both start and end are inclusive.
-inline fn isInbetween(min: u32, length: u32, value: u32) bool {
-    return value >= min and value <= min + length;
-}
-
 fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
     for (self.objects.items) |object| {
         for (object.symtable) |*symbol| {
@@ -403,7 +395,7 @@ fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
 fn setupMemory(self: *Wasm) !void {
     log.debug("Setting up memory layout", .{});
     const page_size = 64 * 1024;
-    const stack_size = page_size * 1;
+    const stack_size = self.options.stack_size orelse page_size * 1;
     const stack_alignment = 16;
     var memory_ptr: u32 = self.options.global_base orelse 1024;
     memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
@@ -413,7 +405,8 @@ fn setupMemory(self: *Wasm) !void {
         if (self.code_section_index) |index| {
             if (index == i) continue;
         }
-        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, @as(u32, 1) << @intCast(u5, segment.alignment));
+        const alignment = @as(u64, 1) << @intCast(u6, segment.alignment);
+        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, @truncate(u32, alignment));
         memory_ptr += segment.size;
     }
 
@@ -422,7 +415,7 @@ fn setupMemory(self: *Wasm) !void {
     memory_ptr += stack_size;
 
     // Setup the max amount of pages
-    const max_memory_allowed: u32 = @intCast(u32, (@as(u33, 1) << @intCast(u6, (self.options.max_memory orelse 32))) - 1);
+    const max_memory_allowed: u32 = (1 << 32) - 1;
 
     if (self.options.initial_memory) |initial_memory| {
         if (!std.mem.isAligned(initial_memory, page_size)) {
@@ -479,7 +472,11 @@ pub fn getMatchingSegment(self: *Wasm, gpa: *Allocator, object_index: u16, reloc
 
     switch (relocatable_data.type) {
         .data => {
-            const segment_name = object.segment_info[relocatable_data.index].outputName();
+            const segment_info = object.segment_info[relocatable_data.index];
+            const segment_name = if (self.options.merge_data_segments)
+                segment_info.outputName()
+            else
+                segment_info.name;
             const result = try self.data_segments.getOrPut(gpa, segment_name);
             if (!result.found_existing) {
                 result.value_ptr.* = index;

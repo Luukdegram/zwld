@@ -30,9 +30,10 @@ const usage =
     \\--import-table                     Import function table from the host environment
     \\--initial-memory=<value>           Initial size of the linear memory
     \\--max-memory=<value>               Maximum size of the linear memory
-    \\--merge-data-segments              Enable merging data segments
+    \\--merge-data-segments[=false]      Enable merging data segments (default=true)
     \\--no-entry                         Do not output any entry point
     \\--stack-first                      Place stack at start of linear memory instead of after data
+    \\--stack-size=<value>               Specifies the stack size in bytes
 ;
 
 pub fn main() !void {
@@ -60,10 +61,11 @@ pub fn main() !void {
     var import_table: bool = false;
     var initial_memory: ?u32 = null;
     var max_memory: ?u32 = null;
-    var merge_data_segments = false;
+    var merge_data_segments = true;
     var no_entry = false;
-    var stack_first = false;
     var output_path: ?[]const u8 = null;
+    var stack_first = false;
+    var stack_size: ?u32 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -78,7 +80,7 @@ pub fn main() !void {
             continue;
         }
         if (mem.startsWith(u8, arg, "--global-base")) {
-            const index = std.mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for global base", .{});
+            const index = mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for global base", .{});
             global_base = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch printErrorAndExit(
                 "Could not parse value '{s}' into integer",
                 .{arg[index + 1 ..]},
@@ -94,7 +96,7 @@ pub fn main() !void {
             continue;
         }
         if (mem.startsWith(u8, arg, "--initial-memory")) {
-            const index = std.mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for initial memory", .{});
+            const index = mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for initial memory", .{});
             initial_memory = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch printErrorAndExit(
                 "Could not parse value '{s}' into integer",
                 .{arg[index + 1 ..]},
@@ -102,15 +104,20 @@ pub fn main() !void {
             continue;
         }
         if (mem.startsWith(u8, arg, "--max-memory")) {
-            const index = std.mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for max memory", .{});
+            const index = mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for max memory", .{});
             max_memory = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch printErrorAndExit(
                 "Could not parse value '{s}' into integer",
                 .{arg[index + 1 ..]},
             );
             continue;
         }
-        if (mem.eql(u8, arg, "--merge-data-segments")) {
+        if (mem.startsWith(u8, arg, "--merge-data-segments")) {
             merge_data_segments = true;
+            if (mem.indexOfScalar(u8, arg, '=')) |index| {
+                if (mem.eql(u8, arg[index + 1 ..], "false")) {
+                    merge_data_segments = false;
+                }
+            }
             continue;
         }
         if (mem.eql(u8, arg, "--no-entry")) {
@@ -121,11 +128,22 @@ pub fn main() !void {
             stack_first = true;
             continue;
         }
+        if (mem.startsWith(u8, arg, "--stack-size")) {
+            const index = mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for stack size", .{});
+            stack_size = std.fmt.parseInt(u32, arg[index + 1 ..], 10) catch printErrorAndExit(
+                "Could not parse value '{s}' into integer",
+                .{arg[index + 1 ..]},
+            );
+            continue;
+        }
         if (mem.eql(u8, arg, "-o")) {
             if (i + 1 >= args.len) printErrorAndExit("Missing output file argument", .{});
             output_path = args[i + 1];
             i += 1;
             continue;
+        }
+        if (mem.startsWith(u8, arg, "--")) {
+            printErrorAndExit("Unknown argument '{s}'", .{arg});
         }
         try positionals.append(arg);
     }
@@ -148,6 +166,7 @@ pub fn main() !void {
         .merge_data_segments = merge_data_segments,
         .no_entry = no_entry,
         .stack_first = stack_first,
+        .stack_size = stack_size,
     });
     defer wasm_bin.deinit(gpa);
 
