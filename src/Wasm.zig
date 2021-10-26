@@ -163,9 +163,9 @@ pub fn flush(self: *Wasm, gpa: *Allocator) !void {
     for (self.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
     }
+    try self.setupLinkerSymbols(gpa);
     try self.setupStart();
     try self.mergeImports(gpa);
-    try self.setupLinkerSymbols(gpa);
     try self.allocateAtoms();
     try self.setupMemory();
     try self.mergeSections(gpa);
@@ -344,8 +344,9 @@ fn setupLinkerSymbols(self: *Wasm, gpa: *Allocator) !void {
         const object = self.objects.items[sym_with_loc.file];
         const symbol = &object.symtable[sym_with_loc.sym_index];
         symbol.marked = true;
+        symbol.setUndefined(false);
         try self.globals.append(gpa, 0, symbol.kind.global.global);
-        symbol.kind.global.global = &self.globals.items.items[symbol.kind.global.global.global_idx];
+        symbol.kind.global.global = &self.globals.items.items[self.globals.count() - 1];
         break :blk symbol;
     } else null;
 }
@@ -387,10 +388,14 @@ const SymbolIterator = struct {
 fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
     for (self.objects.items) |object| {
         for (object.symtable) |*symbol| {
-            if (symbol.requiresImport()) {
-                log.debug("Symbol '{s}' will be imported", .{symbol.name});
-                try self.imports.appendSymbol(gpa, symbol);
+            if (!symbol.requiresImport()) {
+                continue;
             }
+            if (Symbol.linker_defined.indirect_function_table) |table| {
+                if (symbol == table) continue;
+            }
+            log.err("Symbol '{s}' will be imported", .{symbol.name});
+            try self.imports.appendSymbol(gpa, symbol);
         }
     }
     if (self.options.import_table) {

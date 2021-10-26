@@ -861,6 +861,9 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
                 // rather than within the entire section.
                 relocation.offset -= relocatable_data.offset;
                 try atom.relocs.append(gpa, relocation.*);
+
+                // mark relocation symbol as 'marked' to ensure it does not get garbage collected.
+                self.symtable[relocation.index].marked = true;
             }
         }
 

@@ -189,6 +189,14 @@ pub fn isUndefined(self: Symbol) bool {
     return self.flags & @enumToInt(Flag.WASM_SYM_UNDEFINED) != 0;
 }
 
+pub fn setUndefined(self: *Symbol, is_undefined: bool) void {
+    if (is_undefined) {
+        self.setFlag(.WASM_SYM_UNDEFINED);
+    } else {
+        self.flags &= ~@enumToInt(Flag.WASM_SYM_UNDEFINED);
+    }
+}
+
 pub fn isDefined(self: Symbol) bool {
     return !self.isUndefined();
 }
