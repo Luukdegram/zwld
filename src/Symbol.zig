@@ -223,6 +223,7 @@ pub fn isNoStrip(self: Symbol) bool {
 
 pub fn isExported(self: Symbol) bool {
     if (self.isUndefined() or self.isLocal()) return false;
+    if (self.isHidden()) return false;
     return self.hasFlag(.WASM_SYM_EXPORTED);
 }
 

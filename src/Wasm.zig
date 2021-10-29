@@ -299,10 +299,19 @@ fn mergeTypes(self: *Wasm, gpa: *Allocator) !void {
 
 fn setupExports(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Building exports from symbols", .{});
+
+    // When importing memory option is false,
+    // we export the memory.
+    if (!self.options.import_memory) {
+        try self.exports.append(gpa, .{ .name = "memory", .kind = .memory, .index = 0 });
+    }
+
     var symbol_it = SymbolIterator.init(self);
     while (symbol_it.next()) |entry| {
         const symbol = entry.symbol;
         if (!symbol.isExported()) continue;
+        // TODO: Uncomment this when we implement more of the garbage collection
+        // if (!symbol.marked) continue;
 
         var name: []const u8 = symbol.name;
         var exported: wasm.Export = undefined;
@@ -312,11 +321,7 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
             if (func.func.export_name) |export_name| {
                 name = export_name;
             }
-            exported = .{
-                .name = name,
-                .kind = .function,
-                .index = func.func.func_idx,
-            };
+            exported = .{ .name = name, .kind = .function, .index = func.functionIndex() };
         } else {
             log.debug("TODO: Export non-functions type({s}) name={s}", .{
                 @tagName(std.meta.activeTag(symbol.kind)),
