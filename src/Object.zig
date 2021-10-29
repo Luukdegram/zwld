@@ -729,7 +729,6 @@ fn Parser(comptime ReaderType: type) type {
                                 &maybe_import.?.kind.function
                             else
                                 self.object.getFunction(index);
-
                             break :blk .{ .function = .{ .index = index, .func = func } };
                         },
                         .global => blk: {

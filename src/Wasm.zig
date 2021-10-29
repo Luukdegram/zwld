@@ -29,6 +29,9 @@ atoms: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 /// All symbols created by the linker, rather than through
 /// object files will be inserted in this list to manage them.
 synthetic_symbols: std.ArrayListUnmanaged(Symbol) = .{},
+/// Merged symbol table of all symbols defined in the final binary.
+/// Maps from a symbol name, to its location.
+symbol_table: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
@@ -126,6 +129,7 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
     for (self.managed_atoms.items) |atom| {
         atom.deinit(gpa);
     }
+    self.symbol_table.deinit(gpa);
     self.managed_atoms.deinit(gpa);
     self.atoms.deinit(gpa);
     self.data_segments.deinit(gpa);
@@ -183,10 +187,26 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
 
     for (object.symtable) |*symbol, i| {
         const sym_idx = @intCast(u32, i);
+        const location: SymbolWithLoc = .{
+            .file = object_index,
+            .sym_index = sym_idx,
+        };
 
-        if (std.mem.eql(u8, symbol.name, Symbol.linker_defined.names.indirect_function_table)) {
+        if (std.mem.eql(u8, symbol.name, Symbol.linker_defined.names.indirect_function_table) and
+            Symbol.linker_defined.indirect_function_table == null)
+        {
             Symbol.linker_defined.indirect_function_table = symbol;
         }
+
+        if (symbol.kind == .table) continue;
+
+        const maybe_existing = try self.symbol_table.getOrPut(gpa, symbol.name);
+        if (maybe_existing.found_existing) {
+            if (self.maybeReplaceSymbol(maybe_existing.value_ptr.*, location)) {
+                // we replaced a symbol, no need for collision detection
+                continue;
+            }
+        } else maybe_existing.value_ptr.* = location;
 
         if (symbol.isWeak() or symbol.isGlobal()) {
             const name = try gpa.dupe(u8, symbol.name);
@@ -229,6 +249,23 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
             };
         }
     }
+}
+
+fn maybeReplaceSymbol(self: *Wasm, existing: SymbolWithLoc, location: SymbolWithLoc) bool {
+    const existing_symbol: *Symbol = &self.objects.items[existing.file].symtable[existing.sym_index];
+    const new_symbol: Symbol = self.objects.items[location.file].symtable[location.sym_index];
+
+    if (existing_symbol.isUndefined() and !new_symbol.isUndefined()) {
+        std.debug.assert(@as(Symbol.Kind.Tag, existing_symbol.kind) == new_symbol.kind);
+        existing_symbol.* = new_symbol;
+        log.debug("Replaced symbol '{s}' from '{s}' with symbol from '{s}'", .{
+            existing_symbol.name,
+            self.objects.items[existing.file].name,
+            self.objects.items[location.file].name,
+        });
+        return true;
+    }
+    return false;
 }
 
 /// Calculates the new indexes for symbols and their respective symbols
@@ -391,21 +428,25 @@ const SymbolIterator = struct {
 };
 
 fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
-    for (self.objects.items) |object| {
-        for (object.symtable) |*symbol| {
-            if (!symbol.requiresImport()) {
-                continue;
-            }
-            if (Symbol.linker_defined.indirect_function_table) |table| {
-                if (symbol == table) continue;
-            }
-            log.err("Symbol '{s}' will be imported", .{symbol.name});
-            try self.imports.appendSymbol(gpa, symbol);
-        }
-    }
     if (self.options.import_table) {
         if (Symbol.linker_defined.indirect_function_table) |existing_table| {
             try self.imports.appendSymbol(gpa, existing_table);
+        }
+    }
+    for (self.objects.items) |object| {
+        for (object.symtable) |*symbol| {
+            if (symbol.kind != .data and
+                symbol.marked)
+            {
+                if (!symbol.requiresImport()) {
+                    continue;
+                }
+                if (Symbol.linker_defined.indirect_function_table) |table| {
+                    if (symbol == table) continue;
+                }
+                log.debug("Symbol '{s}' will be imported", .{symbol.name});
+                try self.imports.appendSymbol(gpa, symbol);
+            }
         }
     }
 }
