@@ -158,6 +158,16 @@ pub fn addObjects(self: *Wasm, gpa: *Allocator, file_paths: []const []const u8) 
     }
 }
 
+/// Returns the data section entry count, skipping the .bss section
+pub fn dataCount(self: Wasm) u32 {
+    var i: u32 = 0;
+    for (self.data_segments.keys()) |key| {
+        if (std.mem.eql(u8, key, ".bss")) continue;
+        i += 1;
+    }
+    return i;
+}
+
 /// Flushes the `Wasm` construct into a final wasm binary by linking
 /// the objects, ensuring the final binary file has no collisions.
 pub fn flush(self: *Wasm, gpa: *Allocator) !void {
@@ -460,6 +470,7 @@ fn setupMemory(self: *Wasm) !void {
     var memory_ptr: u32 = self.options.global_base orelse 1024;
     memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
 
+    var offset: u32 = 0;
     for (self.segments.items) |*segment, i| {
         // skip 'code' segments
         if (self.code_section_index) |index| {
@@ -467,6 +478,8 @@ fn setupMemory(self: *Wasm) !void {
         }
         memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, segment.alignment);
         memory_ptr += segment.size;
+        segment.offset = offset;
+        offset += segment.size;
     }
 
     memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);

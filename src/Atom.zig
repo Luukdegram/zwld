@@ -152,7 +152,24 @@ fn relocationValue(self: *Atom, relocation: wasm.Relocation, wasm_bin: *const Wa
         .R_WASM_MEMORY_ADDR_LEB64,
         .R_WASM_MEMORY_ADDR_SLEB,
         .R_WASM_MEMORY_ADDR_SLEB64,
-        => relocation.offset + (relocation.addend orelse 0),
+        => blk: {
+            if (symbol.isUndefined() and (symbol.kind == .data or symbol.isWeak())) {
+                return 0;
+            }
+            const segment_name = object.segment_info[symbol.index().?].outputName();
+            const atom_index = wasm_bin.data_segments.get(segment_name).?;
+            var target_atom = wasm_bin.atoms.getPtr(atom_index).?.*.getFirst();
+            while (true) {
+                if (target_atom.sym_index == relocation.index) break;
+                if (target_atom.next) |next| {
+                    target_atom = next;
+                } else break;
+            }
+            const segment = wasm_bin.segments.items[atom_index];
+            const base = wasm_bin.options.global_base orelse 1024;
+            const offset = target_atom.offset + segment.offset;
+            break :blk offset + base + (relocation.addend orelse 0);
+        },
         .R_WASM_EVENT_INDEX_LEB => symbol.kind.event.index,
         .R_WASM_SECTION_OFFSET_I32,
         .R_WASM_FUNCTION_OFFSET_I32,

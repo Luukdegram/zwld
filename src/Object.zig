@@ -832,17 +832,21 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
 
     for (self.symtable) |symbol, symbol_index| {
         switch (symbol.kind) {
-            .data, .function => if (!symbol.isUndefined()) {
-                const index = symbol.index().?;
+            .function, .data => if (!symbol.isUndefined()) {
                 try symbol_for_segment.putNoClobber(
-                    .{ .kind = symbol.kind, .index = index },
+                    .{ .kind = symbol.kind, .index = symbol.index().? },
                     @intCast(u32, symbol_index),
                 );
             },
             else => continue,
         }
     }
+
     for (self.relocatable_data) |relocatable_data, index| {
+        const sym_index = symbol_for_segment.get(.{
+            .kind = relocatable_data.getSymbolKind(),
+            .index = @intCast(u32, relocatable_data.index),
+        }) orelse continue; // encountered a segment we do not create an atom for
         const final_index = try wasm_bin.getMatchingSegment(gpa, object_index, @intCast(u32, index));
 
         const atom = try Atom.create(gpa);
@@ -852,10 +856,7 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
         atom.file = object_index;
         atom.size = relocatable_data.size;
         atom.alignment = relocatable_data.getAlignment(self);
-        atom.sym_index = symbol_for_segment.get(.{
-            .kind = relocatable_data.getSymbolKind(),
-            .index = @intCast(u32, relocatable_data.index),
-        }).?;
+        atom.sym_index = sym_index;
 
         const relocations: []wasm.Relocation = self.relocations.get(relocatable_data.section_index) orelse &.{};
         for (relocations) |*relocation| {

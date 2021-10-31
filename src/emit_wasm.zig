@@ -115,12 +115,16 @@ pub fn emit(wasm: *Wasm) !void {
     }
 
     if (wasm.data_segments.count() != 0) {
-        const data_count = @intCast(u32, wasm.data_segments.count());
+        const data_count = @intCast(u32, wasm.dataCount());
         log.debug("Writing 'Data' section ({d})", .{data_count});
         const offset = try reserveSectionHeader(file);
         const base_offset = wasm.options.global_base orelse 1024;
 
-        for (wasm.data_segments.values()) |atom_index| {
+        var it = wasm.data_segments.iterator();
+        while (it.next()) |entry| {
+            // do not output the 'bss' section
+            if (std.mem.eql(u8, entry.key_ptr.*, ".bss")) continue;
+            const atom_index = entry.value_ptr.*;
             var atom = wasm.atoms.getPtr(atom_index).?.*.getFirst();
             const segment = wasm.segments.items[atom_index];
             const segment_offset = base_offset + segment.offset;
