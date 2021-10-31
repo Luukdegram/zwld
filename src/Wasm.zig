@@ -465,8 +465,7 @@ fn setupMemory(self: *Wasm) !void {
         if (self.code_section_index) |index| {
             if (index == i) continue;
         }
-        const alignment = @as(u64, 1) << @intCast(u6, segment.alignment);
-        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, @truncate(u32, alignment));
+        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, segment.alignment);
         memory_ptr += segment.size;
     }
 

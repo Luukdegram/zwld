@@ -81,10 +81,14 @@ const RelocatableData = struct {
 
     /// Returns the alignment of the segment, by retrieving it from the segment
     /// meta data of the given object file.
+    /// NOTE: Alignment is encoded as a power of 2, so we shift the symbol's
+    /// alignment to retrieve the natural alignment.
     pub fn getAlignment(self: RelocatableData, object: *const Object) u32 {
         if (self.type != .data) return 1;
         const data_alignment = object.segment_info[self.index].alignment;
-        return if (data_alignment > 0) data_alignment else 1;
+        if (data_alignment == 0) return 1;
+        // Decode from power of 2 to natural alignment
+        return @as(u32, 1) << @intCast(u5, data_alignment);
     }
 
     /// Returns the symbol kind that corresponds to the relocatable section
