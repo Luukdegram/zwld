@@ -263,15 +263,25 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
 
 fn maybeReplaceSymbol(self: *Wasm, existing: SymbolWithLoc, location: SymbolWithLoc) bool {
     const existing_symbol: *Symbol = &self.objects.items[existing.file].symtable[existing.sym_index];
-    const new_symbol: Symbol = self.objects.items[location.file].symtable[location.sym_index];
+    const new_symbol: *Symbol = &self.objects.items[location.file].symtable[location.sym_index];
 
     if (existing_symbol.isUndefined() and !new_symbol.isUndefined()) {
         std.debug.assert(@as(Symbol.Kind.Tag, existing_symbol.kind) == new_symbol.kind);
-        existing_symbol.* = new_symbol;
+        existing_symbol.* = new_symbol.*;
         log.debug("Replaced symbol '{s}' from '{s}' with symbol from '{s}'", .{
             existing_symbol.name,
             self.objects.items[existing.file].name,
             self.objects.items[location.file].name,
+        });
+        return true;
+    }
+    if (!existing_symbol.isUndefined() and new_symbol.isUndefined()) {
+        std.debug.assert(@as(Symbol.Kind.Tag, existing_symbol.kind) == new_symbol.kind);
+        new_symbol.* = existing_symbol.*;
+        log.debug("Resolved undefined symbol '{s}' from '{s}' with symbol from '{s}'", .{
+            new_symbol.name,
+            self.objects.items[location.file].name,
+            self.objects.items[existing.file].name,
         });
         return true;
     }
