@@ -868,10 +868,6 @@ pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bi
                 // rather than within the entire section.
                 relocation.offset -= relocatable_data.offset;
                 try atom.relocs.append(gpa, relocation.*);
-
-                // mark relocation symbol as 'marked' to ensure it does not get garbage collected.
-                if (relocation.relocation_type != .R_WASM_TYPE_INDEX_LEB)
-                    self.symtable[relocation.index].marked = true;
             }
         }
 

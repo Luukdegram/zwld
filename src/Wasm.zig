@@ -368,7 +368,6 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
         const symbol = entry.symbol;
         if (!symbol.isExported()) continue;
         // TODO: Uncomment this when we implement more of the garbage collection
-        // if (!symbol.marked) continue;
 
         var name: []const u8 = symbol.name;
         var exported: wasm.Export = undefined;
@@ -405,7 +404,6 @@ fn setupLinkerSymbols(self: *Wasm, gpa: *Allocator) !void {
         // TODO: Make this a lot nicer by logic to replace symbols
         const object = self.objects.items[sym_with_loc.file];
         const symbol = &object.symtable[sym_with_loc.sym_index];
-        symbol.marked = true;
         symbol.setUndefined(false);
         try self.globals.append(gpa, 0, symbol.kind.global.global);
         symbol.kind.global.global = &self.globals.items.items[self.globals.count() - 1];
@@ -455,9 +453,7 @@ fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
     }
     for (self.objects.items) |object| {
         for (object.symtable) |*symbol| {
-            if (symbol.kind != .data and
-                symbol.marked)
-            {
+            if (symbol.kind != .data) {
                 if (!symbol.requiresImport()) {
                     continue;
                 }
