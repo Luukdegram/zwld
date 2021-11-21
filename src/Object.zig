@@ -111,8 +111,10 @@ pub fn init(gpa: *Allocator, file: std.fs.File, path: []const u8) !Object {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
 
-    try object.parse(&arena.allocator, file.reader());
+    var is_object_file: bool = false;
+    try object.parse(&arena.allocator, file.reader(), &is_object_file);
     object.arena = arena.state;
+    if (!is_object_file) return error.NotObjectFile;
 
     return object;
 }
@@ -263,9 +265,9 @@ pub const ParseError = error{
     UnexpectedTable,
 };
 
-fn parse(self: *Object, gpa: *Allocator, reader: anytype) Parser(@TypeOf(reader)).Error!void {
+fn parse(self: *Object, gpa: *Allocator, reader: anytype, is_object_file: *bool) Parser(@TypeOf(reader)).Error!void {
     var parser = Parser(@TypeOf(reader)).init(self, reader);
-    return parser.parseObject(gpa);
+    return parser.parseObject(gpa, is_object_file);
 }
 
 fn Parser(comptime ReaderType: type) type {
@@ -292,7 +294,7 @@ fn Parser(comptime ReaderType: type) type {
             }
         }
 
-        fn parseObject(self: *Self, gpa: *Allocator) Error!void {
+        fn parseObject(self: *Self, gpa: *Allocator, is_object_file: *bool) Error!void {
             try self.verifyMagicBytes();
             const version = try self.reader.reader().readIntLittle(u32);
 
@@ -312,6 +314,7 @@ fn Parser(comptime ReaderType: type) type {
                         try reader.readNoEof(name);
 
                         if (std.mem.eql(u8, name, "linking")) {
+                            is_object_file.* = true;
                             try self.parseMetadata(gpa, reader.context.bytes_left);
                         } else if (std.mem.startsWith(u8, name, "reloc")) {
                             try self.parseRelocations(gpa);
