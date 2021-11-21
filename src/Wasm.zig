@@ -4,7 +4,7 @@ const Wasm = @This();
 const std = @import("std");
 const Atom = @import("Atom.zig");
 const Object = @import("Object.zig");
-const wasm = @import("data.zig");
+const types = @import("types.zig");
 const Symbol = @import("Symbol.zig");
 const sections = @import("sections.zig");
 
@@ -28,7 +28,7 @@ managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atoms: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 /// All symbols created by the linker, rather than through
 /// object files will be inserted in this list to manage them.
-synthetic_symbols: std.ArrayListUnmanaged(Symbol) = .{},
+synthetic_symbols: std.StringHashMapUnmanaged(SymbolWithLoc) = .{},
 /// Merged symbol table of all symbols defined in the final binary.
 /// Maps from a symbol name, to its location.
 symbol_table: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
@@ -45,7 +45,7 @@ tables: sections.Tables = .{},
 /// Output memory section, this will only be used when `options.import_memory`
 /// is set to false. The limits will be set, based on the total data section size
 /// and other configuration options.
-memories: wasm.Memory = .{ .limits = .{ .min = 0, .max = null } },
+memories: types.Memory = .{ .limits = .{ .min = 0, .max = null } },
 /// Output global section
 globals: sections.Globals = .{},
 /// Output export section
@@ -123,12 +123,10 @@ pub fn deinit(self: *Wasm, gpa: *Allocator) void {
         object.file.?.close();
         object.deinit(gpa);
     }
-    for (self.global_symbols.keys()) |name| {
-        gpa.free(name);
-    }
     for (self.managed_atoms.items) |atom| {
         atom.deinit(gpa);
     }
+    self.synthetic_symbols.deinit(gpa);
     self.symbol_table.deinit(gpa);
     self.managed_atoms.deinit(gpa);
     self.atoms.deinit(gpa);
@@ -206,6 +204,10 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
             Symbol.linker_defined.indirect_function_table == null)
         {
             Symbol.linker_defined.indirect_function_table = symbol;
+            try self.synthetic_symbols.putNoClobber(gpa, symbol.name, .{
+                .sym_index = sym_idx,
+                .file = object_index,
+            });
         }
 
         if (symbol.kind == .table) continue;
@@ -219,11 +221,8 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
         } else maybe_existing.value_ptr.* = location;
 
         if (symbol.isWeak() or symbol.isGlobal()) {
-            const name = try gpa.dupe(u8, symbol.name);
-            const result = try self.global_symbols.getOrPut(gpa, name);
-            defer if (result.found_existing) gpa.free(name);
-
-            log.debug("Found symbol '{s}'", .{name});
+            const result = try self.global_symbols.getOrPut(gpa, symbol.name);
+            log.debug("Found symbol '{s}'", .{symbol.name});
 
             if (!result.found_existing) {
                 result.value_ptr.* = .{
@@ -239,14 +238,14 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: *Allocator, object_index: u16) !void
 
             if (!linked_sym.isUndefined()) {
                 if (symbol.isGlobal() and linked_sym.isGlobal()) {
-                    log.err("symbol '{s}' defined multiple times", .{name});
+                    log.err("symbol '{s}' defined multiple times", .{symbol.name});
                     log.err("  first definition in '{s}'", .{linked_obj.name});
                     log.err("  next definition in '{s}'", .{object.name});
                     return error.SymbolCollision;
                 }
 
                 if (symbol.isWeak()) {
-                    log.debug("symbol '{s}' already defined; skipping...", .{name});
+                    log.debug("symbol '{s}' already defined; skipping...", .{symbol.name});
                     continue;
                 }
             }
@@ -336,7 +335,9 @@ fn mergeTypes(self: *Wasm, gpa: *Allocator) !void {
     log.debug("Merged ({d}) types from object files", .{self.types.count()});
 
     log.debug("Building types from import symbols", .{});
-    for (self.imports.symbols()) |symbol| {
+    for (self.imports.symbols()) |sym_with_loc| {
+        const object = self.objects.items[sym_with_loc.file];
+        const symbol = object.symtable[sym_with_loc.sym_index];
         if (symbol.kind == .function) {
             log.debug("Adding type from function '{s}'", .{symbol.name});
             // ignore the returned index. type will only be appended if it does
@@ -370,7 +371,7 @@ fn setupExports(self: *Wasm, gpa: *Allocator) !void {
         // TODO: Uncomment this when we implement more of the garbage collection
 
         var name: []const u8 = symbol.name;
-        var exported: wasm.Export = undefined;
+        var exported: types.Export = undefined;
         if (symbol.unwrapAs(.function)) |func| {
             // func cannot be `null` because only defined functions
             // can be exported, which is verified with `isExported()`
@@ -447,12 +448,14 @@ const SymbolIterator = struct {
 
 fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
     if (self.options.import_table) {
-        if (Symbol.linker_defined.indirect_function_table) |existing_table| {
-            try self.imports.appendSymbol(gpa, existing_table);
-        }
+        const sym_with_loc = self.synthetic_symbols.get(Symbol.linker_defined.names.indirect_function_table) orelse {
+            log.err("Required import __indirect_function_table is missing from object files", .{});
+            return error.MissingSymbol;
+        };
+        try self.imports.appendSymbol(gpa, self, sym_with_loc);
     }
-    for (self.objects.items) |object| {
-        for (object.symtable) |*symbol| {
+    for (self.objects.items) |object, obj_idx| {
+        for (object.symtable) |*symbol, sym_idx| {
             if (symbol.kind != .data) {
                 if (!symbol.requiresImport()) {
                     continue;
@@ -461,7 +464,10 @@ fn mergeImports(self: *Wasm, gpa: *Allocator) !void {
                     if (symbol == table) continue;
                 }
                 log.debug("Symbol '{s}' will be imported", .{symbol.name});
-                try self.imports.appendSymbol(gpa, symbol);
+                try self.imports.appendSymbol(gpa, self, .{
+                    .file = @intCast(u16, obj_idx),
+                    .sym_index = @intCast(u32, sym_idx),
+                });
             }
         }
     }
@@ -535,7 +541,7 @@ fn setupMemory(self: *Wasm) !void {
 
     // set stack value on global
     if (Symbol.linker_defined.stack_pointer) |stack_pointer| {
-        const global: *wasm.Global = stack_pointer.kind.global.global;
+        const global: *types.Global = stack_pointer.kind.global.global;
         global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
     }
 }

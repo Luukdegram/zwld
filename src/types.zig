@@ -376,19 +376,55 @@ pub const Feature = struct {
     /// - '0x2d' (-): Object does not use this feature, and the link fails if this feature is in the allowed set.
     /// - '0x3d' (=): Object uses this feature, and the link fails if this feature is not in the allowed set,
     /// or if any object does not use this feature.
-    prefix: u8,
-    /// name of the feature, must be unique in the sequence of features.
-    name: []const u8,
+    prefix: Prefix,
+    /// Type of the feature, must be unique in the sequence of features.
+    tag: Tag,
+
+    pub const Tag = enum {
+        atomics,
+        bulk_memory,
+        exception_handling,
+        multivalue,
+        mutable_globals,
+        nontrapping_fptoint,
+        sign_ext,
+        simd128,
+        tail_call,
+    };
+
+    pub const Prefix = enum(u8) {
+        used = '+',
+        disallowed = '-',
+        required = '=',
+    };
+
+    pub fn toString(self: Feature) []const u8 {
+        return switch (self.tag) {
+            .bulk_memory => "bulk-memory",
+            .exception_handling => "exception-handling",
+            .mutable_globals => "mutable-globals",
+            .nontrapping_fptoint => "nontrapping-fptoint",
+            .sign_ext => "sign-ext",
+            .tail_call => "tail-call",
+            else => @tagName(self),
+        };
+    }
+
+    pub fn format(self: Feature, comptime fmt: []const u8, opt: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = opt;
+        _ = fmt;
+        try writer.print("{c} {s}", .{ self.prefix, self.toString() });
+    }
 };
 
-pub const known_features = std.ComptimeStringMap(void, .{
-    .{"atomics"},
-    .{"bulk-memory"},
-    .{"exception-handling"},
-    .{"multivalue"},
-    .{"mutable-globals"},
-    .{"nontrapping-fptoint"},
-    .{"sign-ext"},
-    .{"simd128"},
-    .{"tail-call"},
+pub const known_features = std.ComptimeStringMap(Feature.Tag, .{
+    .{ "atomics", .atomics },
+    .{ "bulk-memory", .bulk_memory },
+    .{ "exception-handling", .exception_handling },
+    .{ "multivalue", .multivalue },
+    .{ "mutable-globals", .mutable_globals },
+    .{ "nontrapping-fptoint", .nontrapping_fptoint },
+    .{ "sign-ext", .sign_ext },
+    .{ "simd128", .simd128 },
+    .{ "tail-call", .tail_call },
 });

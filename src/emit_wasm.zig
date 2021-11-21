@@ -2,13 +2,14 @@
 //! to the final binary file that was passed to the `Wasm` object.
 //! When a section contains no entries, the section will not be emitted.
 
-const Wasm = @import("Wasm.zig");
-const Symbol = @import("Symbol.zig");
-const data = @import("data.zig");
+const Object = @import("Object.zig");
 const std = @import("std");
+const Symbol = @import("Symbol.zig");
+const types = @import("types.zig");
+const Wasm = @import("Wasm.zig");
 
-const leb = std.leb;
 const fs = std.fs;
+const leb = std.leb;
 const log = std.log.scoped(.zwld);
 
 /// Writes the given `Wasm` object into a binary file as-is.
@@ -34,7 +35,7 @@ pub fn emit(wasm: *Wasm) !void {
         const offset = try reserveSectionHeader(file);
 
         if (wasm.options.import_memory) {
-            const mem_import: data.Import = .{
+            const mem_import: types.Import = .{
                 .module_name = "env",
                 .name = "memory",
                 .kind = .{ .memory = wasm.memories.limits },
@@ -42,8 +43,9 @@ pub fn emit(wasm: *Wasm) !void {
             try emitImport(mem_import, writer);
         }
 
-        for (wasm.imports.symbols()) |symbol| {
-            try emitImportSymbol(symbol.*, writer);
+        for (wasm.imports.symbols()) |sym_with_loc| {
+            const object = wasm.objects.items[sym_with_loc.file];
+            try emitImportSymbol(object, sym_with_loc.sym_index, writer);
         }
 
         // TODO: Also emit GOT symbols
@@ -183,7 +185,7 @@ fn reserveSectionHeader(file: fs.File) !u64 {
 fn emitSectionHeader(
     file: fs.File,
     offset: u64,
-    section_type: data.SectionType,
+    section_type: types.SectionType,
     entries: usize,
 ) !void {
     // section id, section byte size, section entry count
@@ -203,7 +205,7 @@ fn emitSectionHeader(
     });
 }
 
-fn emitType(type_entry: data.FuncType, writer: anytype) !void {
+fn emitType(type_entry: types.FuncType, writer: anytype) !void {
     log.debug("Writing type {}", .{type_entry});
     try leb.writeULEB128(writer, @as(u8, 0x60)); //functype
     try leb.writeULEB128(writer, @intCast(u32, type_entry.params.len));
@@ -216,9 +218,10 @@ fn emitType(type_entry: data.FuncType, writer: anytype) !void {
     }
 }
 
-fn emitImportSymbol(symbol: Symbol, writer: anytype) !void {
-    var import: data.Import = .{
-        .module_name = symbol.module_name.?,
+fn emitImportSymbol(object: Object, symbol_index: u32, writer: anytype) !void {
+    const symbol = object.symtable[symbol_index];
+    var import: types.Import = .{
+        .module_name = object.imports[symbol_index].module_name,
         .name = symbol.name,
         .kind = undefined,
     };
@@ -233,7 +236,7 @@ fn emitImportSymbol(symbol: Symbol, writer: anytype) !void {
     try emitImport(import, writer);
 }
 
-fn emitImport(import_entry: data.Import, writer: anytype) !void {
+fn emitImport(import_entry: types.Import, writer: anytype) !void {
     try leb.writeULEB128(writer, @intCast(u32, import_entry.module_name.len));
     try writer.writeAll(import_entry.module_name);
 
@@ -252,17 +255,17 @@ fn emitImport(import_entry: data.Import, writer: anytype) !void {
     }
 }
 
-fn emitFunction(func: data.Func, writer: anytype) !void {
+fn emitFunction(func: types.Func, writer: anytype) !void {
     log.debug("Writing func with type index: {d}", .{func.type_idx});
     try leb.writeULEB128(writer, func.type_idx);
 }
 
-fn emitTable(table: data.Table, writer: anytype) !void {
+fn emitTable(table: types.Table, writer: anytype) !void {
     try leb.writeULEB128(writer, @enumToInt(table.reftype));
     try emitLimits(table.limits, writer);
 }
 
-fn emitLimits(limits: data.Limits, writer: anytype) !void {
+fn emitLimits(limits: types.Limits, writer: anytype) !void {
     try leb.writeULEB128(writer, @boolToInt(limits.max != null));
     try leb.writeULEB128(writer, limits.min);
     if (limits.max) |max| {
@@ -270,17 +273,17 @@ fn emitLimits(limits: data.Limits, writer: anytype) !void {
     }
 }
 
-fn emitMemory(mem: data.Memory, writer: anytype) !void {
+fn emitMemory(mem: types.Memory, writer: anytype) !void {
     try emitLimits(mem.limits, writer);
 }
 
-fn emitGlobal(global: data.Global, writer: anytype) !void {
+fn emitGlobal(global: types.Global, writer: anytype) !void {
     try leb.writeULEB128(writer, @enumToInt(global.valtype));
     try leb.writeULEB128(writer, @boolToInt(global.mutable));
     if (global.init) |init| try emitInitExpression(init, writer);
 }
 
-fn emitInitExpression(init: data.InitExpression, writer: anytype) !void {
+fn emitInitExpression(init: types.InitExpression, writer: anytype) !void {
     switch (init) {
         .i32_const => |val| {
             try leb.writeULEB128(writer, std.wasm.opcode(.i32_const));
@@ -294,7 +297,7 @@ fn emitInitExpression(init: data.InitExpression, writer: anytype) !void {
     try leb.writeULEB128(writer, std.wasm.opcode(.end));
 }
 
-fn emitExport(exported: data.Export, writer: anytype) !void {
+fn emitExport(exported: types.Export, writer: anytype) !void {
     try leb.writeULEB128(writer, @intCast(u32, exported.name.len));
     try writer.writeAll(exported.name);
     try leb.writeULEB128(writer, @enumToInt(exported.kind));

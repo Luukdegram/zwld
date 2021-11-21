@@ -1,7 +1,7 @@
 const Atom = @This();
 
 const std = @import("std");
-const wasm = @import("data.zig");
+const types = @import("types.zig");
 const Wasm = @import("Wasm.zig");
 const Symbol = @import("Symbol.zig");
 
@@ -17,7 +17,7 @@ file: u16,
 /// Size of the atom, used to calculate section sizes in the final binary
 size: u32,
 /// List of relocations belonging to this atom
-relocs: std.ArrayListUnmanaged(wasm.Relocation) = .{},
+relocs: std.ArrayListUnmanaged(types.Relocation) = .{},
 /// Contains the binary data of an atom, which can be non-relocated
 code: std.ArrayListUnmanaged(u8) = .{},
 /// For code this is 1, for data this is set to the highest value of all segments
@@ -131,7 +131,7 @@ pub fn resolveRelocs(self: *Atom, wasm_bin: *const Wasm) !void {
 /// From a given `relocation` will return the new value to be written.
 /// All values will be represented as a `u64` as all values can fit within it.
 /// The final value must be casted to the correct size.
-fn relocationValue(self: *Atom, relocation: wasm.Relocation, wasm_bin: *const Wasm) u64 {
+fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const Wasm) u64 {
     const object = wasm_bin.objects.items[self.file];
     const symbol: Symbol = object.symtable[relocation.index];
     return switch (relocation.relocation_type) {

@@ -3,15 +3,13 @@
 const Symbol = @This();
 
 const std = @import("std");
-const wasm = @import("data.zig");
+const types = @import("types.zig");
 
 /// Bitfield containings flags for a symbol
 /// Can contain any of the flags defined in `Flag`
 flags: u32,
 /// Symbol name, when undefined this will be taken from the import.
 name: []const u8,
-/// When the symbol is an import, this field will be non-null.
-module_name: ?[]const u8 = null,
 /// An union that represents both the type of symbol
 /// as well as the data it holds.
 kind: Kind,
@@ -36,7 +34,7 @@ pub const Kind = union(Tag) {
 
         /// From a given symbol kind, returns the `ExternalType`
         /// Asserts the given tag can be represented as an external type.
-        pub fn externalType(self: Tag) wasm.ExternalType {
+        pub fn externalType(self: Tag) types.ExternalType {
             return switch (self) {
                 .function => .function,
                 .global => .global,
@@ -144,13 +142,13 @@ pub const Global = struct {
     index: u32,
 
     /// Reference to the Global represented by this symbol
-    global: *wasm.Global,
+    global: *types.Global,
 };
 
 pub const Function = struct {
     index: u32,
     /// Pointer to the function representing this symbol
-    func: *wasm.Func,
+    func: *types.Func,
     /// When set, this function is an indirect function call
     /// and this index represents its position within the table.
     table_index: ?u32 = null,
@@ -169,7 +167,7 @@ pub const Table = struct {
     index: u32,
 
     /// Reference to a table that is represented by this symbol
-    table: *wasm.Table,
+    table: *types.Table,
 };
 
 pub fn hasFlag(self: Symbol, flag: Flag) bool {
@@ -224,16 +222,6 @@ pub fn isExported(self: Symbol) bool {
 
 pub fn isWeak(self: Symbol) bool {
     return self.flags & @enumToInt(Flag.WASM_SYM_BINDING_WEAK) != 0;
-}
-
-pub fn eqlBinding(self: Symbol, other: Symbol) bool {
-    if (self.isLocal() != other.isLocal()) {
-        return false;
-    }
-    if (self.isWeak() != other.isWeak()) {
-        return false;
-    }
-    return true;
 }
 
 /// Formats the symbol into human-readable text

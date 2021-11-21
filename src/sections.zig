@@ -3,7 +3,7 @@
 const std = @import("std");
 const Symbol = @import("Symbol.zig");
 const Object = @import("Object.zig");
-const wasm = @import("data.zig");
+const types = @import("types.zig");
 const Wasm = @import("Wasm.zig");
 const Allocator = std.mem.Allocator;
 
@@ -23,11 +23,11 @@ pub const Functions = struct {
     /// Holds the list of function type indexes.
     /// The list is built from merging all defined functions into this single list.
     /// Once appended, it becomes immutable and should not be mutated outside this list.
-    items: std.ArrayListUnmanaged(wasm.Func) = .{},
+    items: std.ArrayListUnmanaged(types.Func) = .{},
 
     /// Adds a new function to the section while also setting the function index
     /// of the `Func` itself.
-    pub fn append(self: *Functions, gpa: *Allocator, offset: u32, func: *wasm.Func) !void {
+    pub fn append(self: *Functions, gpa: *Allocator, offset: u32, func: *types.Func) !void {
         func.func_idx = offset + self.count();
         try self.items.append(gpa, func.*);
     }
@@ -57,7 +57,7 @@ pub const Imports = struct {
     /// within this map.
     imported_tables: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
     /// A list of symbols representing objects that have been imported.
-    imported_symbols: std.ArrayListUnmanaged(*Symbol) = .{},
+    imported_symbols: std.ArrayListUnmanaged(Wasm.SymbolWithLoc) = .{},
 
     const ImportKey = struct {
         module_name: []const u8,
@@ -89,8 +89,15 @@ pub const Imports = struct {
     /// to their respective import list (such as imported_functions)
     ///
     /// NOTE: The given symbol must reside within the given `Object`.
-    pub fn appendSymbol(self: *Imports, gpa: *Allocator, symbol: *Symbol) !void {
-        const module_name = symbol.module_name.?;
+    pub fn appendSymbol(
+        self: *Imports,
+        gpa: *Allocator,
+        wasm: *const Wasm,
+        sym_with_loc: Wasm.SymbolWithLoc,
+    ) !void {
+        const object = wasm.objects.items[sym_with_loc.file];
+        const symbol = object.symtable[sym_with_loc.sym_index];
+        const module_name = object.imports[sym_with_loc.sym_index].module_name;
         const import_name = symbol.name;
 
         switch (symbol.kind) {
@@ -100,7 +107,7 @@ pub const Imports = struct {
                     .name = import_name,
                 });
                 if (!ret.found_existing) {
-                    try self.imported_symbols.append(gpa, symbol);
+                    try self.imported_symbols.append(gpa, sym_with_loc);
                     ret.value_ptr.* = @intCast(u32, self.imported_functions.count() - 1);
                 }
                 func.func.func_idx = ret.value_ptr.*;
@@ -112,7 +119,7 @@ pub const Imports = struct {
                     .name = import_name,
                 });
                 if (!ret.found_existing) {
-                    try self.imported_symbols.append(gpa, symbol);
+                    try self.imported_symbols.append(gpa, sym_with_loc);
                     ret.value_ptr.* = @intCast(u32, self.imported_globals.count() - 1);
                 }
                 global.global.global_idx = ret.value_ptr.*;
@@ -124,7 +131,7 @@ pub const Imports = struct {
                     .name = import_name,
                 });
                 if (!ret.found_existing) {
-                    try self.imported_symbols.append(gpa, symbol);
+                    try self.imported_symbols.append(gpa, sym_with_loc);
                     ret.value_ptr.* = @intCast(u32, self.imported_tables.count() - 1);
                 }
                 table.table.table_idx = ret.value_ptr.*;
@@ -158,7 +165,7 @@ pub const Imports = struct {
     }
 
     /// Returns a slice to pointers to symbols that have been imported
-    pub fn symbols(self: Imports) []const *Symbol {
+    pub fn symbols(self: Imports) []const Wasm.SymbolWithLoc {
         return self.imported_symbols.items;
     }
 
@@ -172,13 +179,13 @@ pub const Imports = struct {
 pub const Globals = struct {
     /// A list of `wasm.Global`s
     /// Once appended to this list, they should no longer be mutated
-    items: std.ArrayListUnmanaged(wasm.Global) = .{},
+    items: std.ArrayListUnmanaged(types.Global) = .{},
     /// List of internal GOT symbols
     got_symbols: std.ArrayListUnmanaged(*Symbol) = .{},
 
     /// Appends a new global and sets the `global_idx` on the global based on the
     /// current count of globals and the given `offset`.
-    pub fn append(self: *Globals, gpa: *Allocator, offset: u32, global: *wasm.Global) !void {
+    pub fn append(self: *Globals, gpa: *Allocator, offset: u32, global: *types.Global) !void {
         global.global_idx = offset + self.count();
         try self.items.append(gpa, global.*);
     }
@@ -204,7 +211,7 @@ pub const Globals = struct {
     ///
     /// This will automatically set `init` to `null` and can manually be updated at a later point using
     /// the returned pointer.
-    pub fn create(self: *Globals, gpa: *Allocator, mutability: enum { mutable, immutable }, valtype: wasm.ValueType) !*wasm.Global {
+    pub fn create(self: *Globals, gpa: *Allocator, mutability: enum { mutable, immutable }, valtype: types.ValueType) !*types.Global {
         const index = self.count();
         try self.items.append(gpa, .{
             .valtype = valtype,
@@ -236,12 +243,12 @@ pub const Types = struct {
     /// this list, duplicates will be removed.
     ///
     /// TODO: Would a hashmap be more efficient?
-    items: std.ArrayListUnmanaged(wasm.FuncType) = .{},
+    items: std.ArrayListUnmanaged(types.FuncType) = .{},
 
     /// Checks if a given type is already present within the list of types.
     /// If not, the given type will be appended to the list.
     /// In all cases, this will return the index within the list of types.
-    pub fn append(self: *Types, gpa: *Allocator, func_type: wasm.FuncType) !u32 {
+    pub fn append(self: *Types, gpa: *Allocator, func_type: types.FuncType) !u32 {
         return self.find(func_type) orelse {
             const index = self.count();
             try self.items.append(gpa, func_type);
@@ -251,17 +258,17 @@ pub const Types = struct {
 
     /// Returns a pointer to the function type at given `index`
     /// Asserts the index is within bounds.
-    pub fn get(self: Types, index: u32) *wasm.FuncType {
+    pub fn get(self: Types, index: u32) *types.FuncType {
         return &self.items.items[index];
     }
 
     /// Checks if any type (read: function signature) already exists within
     /// the type section. When it does exist, it will return its index
     /// otherwise, returns `null`.
-    pub fn find(self: Types, func_type: wasm.FuncType) ?u32 {
+    pub fn find(self: Types, func_type: types.FuncType) ?u32 {
         return for (self.items.items) |ty, index| {
-            if (std.mem.eql(wasm.ValueType, ty.params, func_type.params) and
-                std.mem.eql(wasm.ValueType, ty.returns, func_type.returns))
+            if (std.mem.eql(types.ValueType, ty.params, func_type.params) and
+                std.mem.eql(types.ValueType, ty.returns, func_type.returns))
             {
                 return @intCast(u32, index);
             }
@@ -286,11 +293,11 @@ pub const Tables = struct {
     /// The list of tables that have been merged from all
     /// object files. This does not include any linker-defined
     /// tables. Once inserted in this list, the object becomes immutable.
-    items: std.ArrayListUnmanaged(wasm.Table) = .{},
+    items: std.ArrayListUnmanaged(types.Table) = .{},
 
     /// Appends a new table to the list of tables and sets its index to
     /// the position within the list of tables.
-    pub fn append(self: *Tables, gpa: *Allocator, offset: u32, table: *wasm.Table) !void {
+    pub fn append(self: *Tables, gpa: *Allocator, offset: u32, table: *types.Table) !void {
         const index = offset + self.count();
         table.table_idx = index;
         try self.items.append(gpa, table.*);
@@ -345,14 +352,14 @@ pub const Tables = struct {
 pub const Exports = struct {
     /// List of exports, containing both merged exports
     /// as linker-defined exports such as __stack_pointer.
-    items: std.ArrayListUnmanaged(wasm.Export) = .{},
+    items: std.ArrayListUnmanaged(types.Export) = .{},
 
     /// Contains a list of pointers to symbols
     /// TODO: Do we really need this list?
     symbols: std.ArrayListUnmanaged(*Symbol) = .{},
 
     /// Appends a given `wasm.Export` to the list of output exports.
-    pub fn append(self: *Exports, gpa: *Allocator, exp: wasm.Export) !void {
+    pub fn append(self: *Exports, gpa: *Allocator, exp: types.Export) !void {
         try self.items.append(gpa, exp);
     }
 
