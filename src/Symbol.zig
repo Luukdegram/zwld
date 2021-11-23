@@ -34,7 +34,7 @@ pub const Kind = union(Tag) {
 
         /// From a given symbol kind, returns the `ExternalType`
         /// Asserts the given tag can be represented as an external type.
-        pub fn externalType(self: Tag) types.ExternalType {
+        pub fn externalType(self: Tag) std.wasm.ExternalKind {
             return switch (self) {
                 .function => .function,
                 .global => .global,

@@ -2,39 +2,9 @@ const std = @import("std");
 const wasm = std.wasm;
 const TypeInfo = std.builtin.TypeInfo;
 
-/// Wasm union that contains the value of each possible `ValueType`
-pub const Value = union(ValueType) {
-    i32: i32,
-    i64: i64,
-    f32: f32,
-    f64: f64,
-    /// Reference to another function regardless of their function type
-    funcref: u32,
-    /// Reference to an external object (object from the embedder)
-    externref: u32,
-};
-
-/// Value types for locals and globals
-pub const NumType = enum(u8) {
-    i32 = 0x7F,
-    i64 = 0x7E,
-    f32 = 0xfD,
-    f64 = 0xfE,
-};
-
 /// Reference types, where the funcref references to a function regardless of its type
 /// and ref references an object from the embedder.
 pub const RefType = enum(u8) {
-    funcref = 0x70,
-    externref = 0x6F,
-};
-
-/// Represents the several types a wasm value can have
-pub const ValueType = enum(u8) {
-    i32 = 0x7F,
-    i64 = 0x7E,
-    f32 = 0xfD,
-    f64 = 0xfE,
     funcref = 0x70,
     externref = 0x6F,
 };
@@ -62,37 +32,6 @@ pub const SectionType = enum(u8) {
     _,
 };
 
-/// Represents a wasm section entry within a wasm module
-/// A section contains meta data that can be used to parse its contents from within a file.
-pub const Section = struct {
-    /// The type of a section
-    section_kind: SectionType,
-    /// Offset into the object file where the section starts
-    offset: usize,
-    /// Size in bytes of the section
-    size: usize,
-};
-
-/// Merges a given enum type and a slice of `EnumField` into a new enum type
-fn MergedEnum(comptime T: type, comptime fields: []const TypeInfo.EnumField) type {
-    if (@typeInfo(T) != .Enum) {
-        @compileError("Given type 'T' must be an enum type but instead was given: " ++ @typeName(T));
-    }
-
-    const new_fields = std.meta.fields(T) ++ fields;
-
-    return @Type(.{ .Enum = .{
-        .layout = .Auto,
-        .tag_type = u8,
-        .fields = new_fields,
-        .decls = &.{},
-        .is_exhaustive = false,
-    } });
-}
-
-/// External types that can be imported or exported between to/from the host
-pub const ExternalType = wasm.ExternalKind;
-
 /// Limits classify the size range of resizeable storage associated with memory types and table types.
 pub const Limits = struct {
     min: u32,
@@ -105,31 +44,9 @@ pub const InitExpression = union(enum) {
     global_get: u32,
 };
 
-pub const Custom = struct {
-    name: []const u8,
-    /// For custom sections, data may be null when it represents
-    /// linking metadata, features or relocations as we parse those individually
-    /// into a self-contained type.
-    data: ?[]const u8 = null,
-    start: usize,
-    end: usize,
-
-    pub fn format(self: Custom, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("{s: >8} start=0x{x:0>8} end=0x{x:0>8} (size=0x{x:0>8}) \"{s}\"", .{
-            "Custom",
-            self.start,
-            self.end,
-            self.end - self.start,
-            self.name,
-        });
-    }
-};
-
 pub const FuncType = struct {
-    params: []const ValueType,
-    returns: []const ValueType,
+    params: []const wasm.Valtype,
+    returns: []const wasm.Valtype,
 
     pub fn format(self: FuncType, comptime fmt: []const u8, opt: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
@@ -160,7 +77,7 @@ pub const Import = struct {
     name: []const u8,
     kind: Kind,
 
-    pub const Kind = union(ExternalType) {
+    pub const Kind = union(wasm.ExternalKind) {
         function: Func,
         table: Table,
         memory: Limits,
@@ -196,7 +113,7 @@ pub const Memory = struct {
 };
 
 pub const Global = struct {
-    valtype: ValueType,
+    valtype: wasm.Valtype,
     mutable: bool,
     init: ?InitExpression = null, // null for imported globals
 
@@ -206,7 +123,7 @@ pub const Global = struct {
 
 pub const Export = struct {
     name: []const u8,
-    kind: ExternalType,
+    kind: wasm.ExternalKind,
     index: u32,
 };
 

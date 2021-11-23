@@ -221,7 +221,7 @@ fn emitType(type_entry: types.FuncType, writer: anytype) !void {
 fn emitImportSymbol(object: Object, symbol_index: u32, writer: anytype) !void {
     const symbol = object.symtable[symbol_index];
     var import: types.Import = .{
-        .module_name = object.imports[symbol_index].module_name,
+        .module_name = object.imports[symbol.index().?].module_name,
         .name = symbol.name,
         .kind = undefined,
     };

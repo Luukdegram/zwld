@@ -130,7 +130,7 @@ pub fn deinit(self: *Object, gpa: *Allocator) void {
 
 /// Finds the import within the list of imports from a given kind and index of that kind.
 /// Asserts the import exists
-pub fn findImport(self: *const Object, import_kind: types.ExternalType, index: u32) *types.Import {
+pub fn findImport(self: *const Object, import_kind: std.wasm.ExternalKind, index: u32) *types.Import {
     var i: u32 = 0;
     return for (self.imports) |*import| {
         if (std.meta.activeTag(import.kind) == import_kind) {
@@ -141,10 +141,10 @@ pub fn findImport(self: *const Object, import_kind: types.ExternalType, index: u
 }
 
 /// Counts the entries of imported `kind` and returns the result
-pub fn importedCountByKind(self: *const Object, kind: types.ExternalType) u32 {
+pub fn importedCountByKind(self: *const Object, kind: std.wasm.ExternalKind) u32 {
     var i: u32 = 0;
     return for (self.imports) |imp| {
-        if (@as(types.ExternalType, imp.kind) == kind) i += 1;
+        if (@as(std.wasm.ExternalKind, imp.kind) == kind) i += 1;
     } else i;
 }
 
@@ -332,11 +332,11 @@ fn Parser(comptime ReaderType: type) type {
                             if ((try reader.readByte()) != std.wasm.function_type) return error.ExpectedFuncType;
 
                             for (try readVec(&type_val.params, reader, gpa)) |*param| {
-                                param.* = try readEnum(types.ValueType, reader);
+                                param.* = try readEnum(std.wasm.Valtype, reader);
                             }
 
                             for (try readVec(&type_val.returns, reader, gpa)) |*result| {
-                                result.* = try readEnum(types.ValueType, reader);
+                                result.* = try readEnum(std.wasm.Valtype, reader);
                             }
                         }
                         try assertEnd(reader);
@@ -351,7 +351,7 @@ fn Parser(comptime ReaderType: type) type {
                             const name = try gpa.alloc(u8, name_len);
                             try reader.readNoEof(name);
 
-                            const kind = try readEnum(types.ExternalType, reader);
+                            const kind = try readEnum(std.wasm.ExternalKind, reader);
                             const kind_value: types.Import.Kind = switch (kind) {
                                 .function => .{
                                     .function = blk: {
@@ -365,7 +365,7 @@ fn Parser(comptime ReaderType: type) type {
                                 },
                                 .memory => .{ .memory = try readLimits(reader) },
                                 .global => .{ .global = .{
-                                    .valtype = try readEnum(types.ValueType, reader),
+                                    .valtype = try readEnum(std.wasm.Valtype, reader),
                                     .mutable = (try reader.readByte()) == 0x01,
                                     .global_idx = @intCast(u32, index),
                                 } },
@@ -413,7 +413,7 @@ fn Parser(comptime ReaderType: type) type {
                     .global => {
                         for (try readVec(&self.object.globals, reader, gpa)) |*global, index| {
                             global.* = .{
-                                .valtype = try readEnum(types.ValueType, reader),
+                                .valtype = try readEnum(std.wasm.Valtype, reader),
                                 .mutable = (try reader.readByte()) == 0x01,
                                 .init = try readInit(reader),
                                 .global_idx = @intCast(u32, index + self.object.importedCountByKind(.global)),
@@ -428,7 +428,7 @@ fn Parser(comptime ReaderType: type) type {
                             try reader.readNoEof(name);
                             exp.* = .{
                                 .name = name,
-                                .kind = try readEnum(types.ExternalType, reader),
+                                .kind = try readEnum(std.wasm.ExternalKind, reader),
                                 .index = try readLeb(u32, reader),
                             };
 

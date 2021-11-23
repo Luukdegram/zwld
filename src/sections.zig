@@ -95,9 +95,9 @@ pub const Imports = struct {
         wasm: *const Wasm,
         sym_with_loc: Wasm.SymbolWithLoc,
     ) !void {
-        const object = wasm.objects.items[sym_with_loc.file];
+        const object: Object = wasm.objects.items[sym_with_loc.file];
         const symbol = object.symtable[sym_with_loc.sym_index];
-        const module_name = object.imports[sym_with_loc.sym_index].module_name;
+        const module_name = object.imports[symbol.index().?].module_name;
         const import_name = symbol.name;
 
         switch (symbol.kind) {
@@ -267,8 +267,8 @@ pub const Types = struct {
     /// otherwise, returns `null`.
     pub fn find(self: Types, func_type: types.FuncType) ?u32 {
         return for (self.items.items) |ty, index| {
-            if (std.mem.eql(types.ValueType, ty.params, func_type.params) and
-                std.mem.eql(types.ValueType, ty.returns, func_type.returns))
+            if (std.mem.eql(std.wasm.Valtype, ty.params, func_type.params) and
+                std.mem.eql(std.wasm.Valtype, ty.returns, func_type.returns))
             {
                 return @intCast(u32, index);
             }
