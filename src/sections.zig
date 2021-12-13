@@ -27,9 +27,10 @@ pub const Functions = struct {
 
     /// Adds a new function to the section while also setting the function index
     /// of the `Func` itself.
-    pub fn append(self: *Functions, gpa: *Allocator, offset: u32, func: *types.Func) !void {
-        func.func_idx = offset + self.count();
-        try self.items.append(gpa, func.*);
+    pub fn append(self: *Functions, gpa: Allocator, offset: u32, func: types.Func) !u32 {
+        const index = offset + self.count();
+        try self.items.append(gpa, func);
+        return index;
     }
 
     /// Returns the count of entires within the function section
@@ -37,7 +38,7 @@ pub const Functions = struct {
         return @intCast(u32, self.items.items.len);
     }
 
-    pub fn deinit(self: *Functions, gpa: *Allocator) void {
+    pub fn deinit(self: *Functions, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.* = undefined;
     }
@@ -91,12 +92,12 @@ pub const Imports = struct {
     /// NOTE: The given symbol must reside within the given `Object`.
     pub fn appendSymbol(
         self: *Imports,
-        gpa: *Allocator,
+        gpa: Allocator,
         wasm: *const Wasm,
         sym_with_loc: Wasm.SymbolWithLoc,
     ) !void {
-        const object: Object = wasm.objects.items[sym_with_loc.file];
-        const symbol = object.symtable[sym_with_loc.sym_index];
+        const object: *Object = &wasm.objects.items[sym_with_loc.file];
+        const symbol = &object.symtable[sym_with_loc.sym_index];
         const module_name = object.imports[symbol.index().?].module_name;
         const import_name = symbol.name;
 
@@ -110,7 +111,8 @@ pub const Imports = struct {
                     try self.imported_symbols.append(gpa, sym_with_loc);
                     ret.value_ptr.* = @intCast(u32, self.imported_functions.count() - 1);
                 }
-                func.func.func_idx = ret.value_ptr.*;
+                symbol.setIndex(ret.value_ptr.*);
+                // func.func.func_idx = ret.value_ptr.*;
                 log.debug("Imported function '{s}' at index ({d})", .{ import_name, func.index });
             },
             .global => |*global| {
@@ -156,7 +158,7 @@ pub const Imports = struct {
         return @intCast(u32, self.imported_globals.count());
     }
 
-    pub fn deinit(self: *Imports, gpa: *Allocator) void {
+    pub fn deinit(self: *Imports, gpa: Allocator) void {
         self.imported_functions.deinit(gpa);
         self.imported_globals.deinit(gpa);
         self.imported_tables.deinit(gpa);
@@ -185,13 +187,13 @@ pub const Globals = struct {
 
     /// Appends a new global and sets the `global_idx` on the global based on the
     /// current count of globals and the given `offset`.
-    pub fn append(self: *Globals, gpa: *Allocator, offset: u32, global: *types.Global) !void {
+    pub fn append(self: *Globals, gpa: Allocator, offset: u32, global: *types.Global) !void {
         global.global_idx = offset + self.count();
         try self.items.append(gpa, global.*);
     }
 
     /// Appends a new entry to the internal GOT
-    pub fn addGOTEntry(self: *Globals, gpa: *Allocator, symbol: *Symbol, wasm_bin: *Wasm) !void {
+    pub fn addGOTEntry(self: *Globals, gpa: Allocator, symbol: *Symbol, wasm_bin: *Wasm) !void {
         if (symbol.kind == .function) {
             try wasm_bin.tables.createIndirectFunctionTable(gpa, wasm_bin);
             try wasm_bin.elements.appendSymbol(gpa, symbol);
@@ -211,7 +213,7 @@ pub const Globals = struct {
     ///
     /// This will automatically set `init` to `null` and can manually be updated at a later point using
     /// the returned pointer.
-    pub fn create(self: *Globals, gpa: *Allocator, mutability: enum { mutable, immutable }, valtype: types.ValueType) !*types.Global {
+    pub fn create(self: *Globals, gpa: Allocator, mutability: enum { mutable, immutable }, valtype: types.ValueType) !*types.Global {
         const index = self.count();
         try self.items.append(gpa, .{
             .valtype = valtype,
@@ -229,7 +231,7 @@ pub const Globals = struct {
         setIndex("global_idx", self.items.items, offset);
     }
 
-    pub fn deinit(self: *Globals, gpa: *Allocator) void {
+    pub fn deinit(self: *Globals, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.got_symbols.deinit(gpa);
         self.* = undefined;
@@ -248,7 +250,7 @@ pub const Types = struct {
     /// Checks if a given type is already present within the list of types.
     /// If not, the given type will be appended to the list.
     /// In all cases, this will return the index within the list of types.
-    pub fn append(self: *Types, gpa: *Allocator, func_type: types.FuncType) !u32 {
+    pub fn append(self: *Types, gpa: Allocator, func_type: types.FuncType) !u32 {
         return self.find(func_type) orelse {
             const index = self.count();
             try self.items.append(gpa, func_type);
@@ -280,7 +282,7 @@ pub const Types = struct {
         return @intCast(u32, self.items.items.len);
     }
 
-    pub fn deinit(self: *Types, gpa: *Allocator) void {
+    pub fn deinit(self: *Types, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.* = undefined;
     }
@@ -297,7 +299,7 @@ pub const Tables = struct {
 
     /// Appends a new table to the list of tables and sets its index to
     /// the position within the list of tables.
-    pub fn append(self: *Tables, gpa: *Allocator, offset: u32, table: *types.Table) !void {
+    pub fn append(self: *Tables, gpa: Allocator, offset: u32, table: *types.Table) !void {
         const index = offset + self.count();
         table.table_idx = index;
         try self.items.append(gpa, table.*);
@@ -316,7 +318,7 @@ pub const Tables = struct {
 
     /// Creates a synthetic symbol for the indirect function table and appends it into the
     /// table list.
-    pub fn createIndirectFunctionTable(self: *Tables, gpa: *Allocator, wasm_bin: *Wasm) !void {
+    pub fn createIndirectFunctionTable(self: *Tables, gpa: Allocator, wasm_bin: *Wasm) !void {
         // Only create it if it doesn't exist yet
         if (Symbol.linker_defined.indirect_function_table != null) {
             log.debug("Indirect function table already exists, skipping creation...", .{});
@@ -340,7 +342,7 @@ pub const Tables = struct {
         log.debug("Created indirect function table at index {d}", .{index});
     }
 
-    pub fn deinit(self: *Tables, gpa: *Allocator) void {
+    pub fn deinit(self: *Tables, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.* = undefined;
     }
@@ -359,11 +361,11 @@ pub const Exports = struct {
     symbols: std.ArrayListUnmanaged(*Symbol) = .{},
 
     /// Appends a given `wasm.Export` to the list of output exports.
-    pub fn append(self: *Exports, gpa: *Allocator, exp: types.Export) !void {
+    pub fn append(self: *Exports, gpa: Allocator, exp: types.Export) !void {
         try self.items.append(gpa, exp);
     }
 
-    pub fn appendSymbol(self: *Exports, gpa: *Allocator, symbol: *Symbol) !void {
+    pub fn appendSymbol(self: *Exports, gpa: Allocator, symbol: *Symbol) !void {
         try self.symbols.append(gpa, symbol);
     }
 
@@ -372,7 +374,7 @@ pub const Exports = struct {
         return @intCast(u32, self.items.items.len);
     }
 
-    pub fn deinit(self: *Exports, gpa: *Allocator) void {
+    pub fn deinit(self: *Exports, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.symbols.deinit(gpa);
         self.* = undefined;
@@ -387,7 +389,7 @@ pub const Elements = struct {
     /// The table index will be set on the symbol, based on the length
     ///
     /// Asserts symbol represents a function.
-    pub fn appendSymbol(self: *Elements, gpa: *Allocator, symbol: *Symbol) !void {
+    pub fn appendSymbol(self: *Elements, gpa: Allocator, symbol: *Symbol) !void {
         // Check if symbol is already part of the indirect function table
         if (symbol.kind.function.table_index != null) {
             return;
@@ -400,7 +402,7 @@ pub const Elements = struct {
         return @intCast(u32, self.indirect_functions.items.len);
     }
 
-    pub fn deinit(self: *Elements, gpa: *Allocator) void {
+    pub fn deinit(self: *Elements, gpa: Allocator) void {
         self.indirect_functions.deinit(gpa);
         self.* = undefined;
     }

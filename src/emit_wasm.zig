@@ -227,7 +227,7 @@ fn emitImportSymbol(object: Object, symbol_index: u32, writer: anytype) !void {
     };
 
     switch (symbol.kind) {
-        .function => |func| import.kind = .{ .function = func.func.* },
+        // .function => |func| import.kind = .{ .function = func.func.* },
         .global => |global| import.kind = .{ .global = global.global.* },
         .table => |table| import.kind = .{ .table = table.table.* },
         else => unreachable,
@@ -322,6 +322,6 @@ fn emitElement(element: @import("sections.zig").Elements, writer: anytype) !void
     try leb.writeULEB128(writer, element.functionCount());
     for (element.indirect_functions.items) |symbol, el_index| {
         std.debug.assert(symbol.kind.function.table_index.? == el_index);
-        try leb.writeULEB128(writer, symbol.kind.function.functionIndex());
+        // try leb.writeULEB128(writer, symbol.kind.function.functionIndex());
     }
 }

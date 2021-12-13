@@ -148,15 +148,15 @@ pub const Global = struct {
 pub const Function = struct {
     index: u32,
     /// Pointer to the function representing this symbol
-    func: *types.Func,
+    // func: *types.Func,
     /// When set, this function is an indirect function call
     /// and this index represents its position within the table.
     table_index: ?u32 = null,
 
-    /// Returns the function index within the final binary
-    pub fn functionIndex(self: Function) u32 {
-        return self.func.func_idx;
-    }
+    // Returns the function index within the final binary
+    // pub fn functionIndex(self: Function) u32 {
+    //     return self.func.func_idx;
+    // }
 };
 
 pub const Event = struct {

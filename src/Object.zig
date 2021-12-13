@@ -104,7 +104,7 @@ const RelocatableData = struct {
 pub const InitError = error{NotObjectFile} || ParseError || std.fs.File.ReadError;
 
 /// Initializes a new `Object` from a wasm object file.
-pub fn init(gpa: *Allocator, file: std.fs.File, path: []const u8) InitError!Object {
+pub fn init(gpa: Allocator, file: std.fs.File, path: []const u8) InitError!Object {
     var object: Object = .{
         .file = file,
         .name = path,
@@ -114,7 +114,7 @@ pub fn init(gpa: *Allocator, file: std.fs.File, path: []const u8) InitError!Obje
     errdefer arena.deinit();
 
     var is_object_file: bool = false;
-    try object.parse(&arena.allocator, file.reader(), &is_object_file);
+    try object.parse(arena.allocator(), file.reader(), &is_object_file);
     object.arena = arena.state;
     if (!is_object_file) return error.NotObjectFile;
 
@@ -123,7 +123,7 @@ pub fn init(gpa: *Allocator, file: std.fs.File, path: []const u8) InitError!Obje
 
 /// Frees all memory of `Object` at once. The given `Allocator` must be
 /// the same allocator that was used when `init` was called.
-pub fn deinit(self: *Object, gpa: *Allocator) void {
+pub fn deinit(self: *Object, gpa: Allocator) void {
     self.arena.promote(gpa).deinit();
     self.* = undefined;
 }
@@ -268,7 +268,7 @@ pub const ParseError = error{
     UnknownFeature,
 };
 
-fn parse(self: *Object, gpa: *Allocator, reader: anytype, is_object_file: *bool) Parser(@TypeOf(reader)).Error!void {
+fn parse(self: *Object, gpa: Allocator, reader: anytype, is_object_file: *bool) Parser(@TypeOf(reader)).Error!void {
     var parser = Parser(@TypeOf(reader)).init(self, reader);
     return parser.parseObject(gpa, is_object_file);
 }
@@ -297,7 +297,7 @@ fn Parser(comptime ReaderType: type) type {
             }
         }
 
-        fn parseObject(self: *Self, gpa: *Allocator, is_object_file: *bool) Error!void {
+        fn parseObject(self: *Self, gpa: Allocator, is_object_file: *bool) Error!void {
             try self.verifyMagicBytes();
             const version = try self.reader.reader().readIntLittle(u32);
 
@@ -508,7 +508,7 @@ fn Parser(comptime ReaderType: type) type {
         /// features that tell the linker what features were enabled and may be mandatory
         /// to be able to link.
         /// Logs an info message when an undefined feature is detected.
-        fn parseFeatures(self: *Self, gpa: *Allocator) !void {
+        fn parseFeatures(self: *Self, gpa: Allocator) !void {
             const reader = self.reader.reader();
             for (try readVec(&self.object.features, reader, gpa)) |*feature| {
                 const prefix = try readEnum(types.Feature.Prefix, reader);
@@ -530,7 +530,7 @@ fn Parser(comptime ReaderType: type) type {
         /// Parses a "reloc" custom section into a list of relocations.
         /// The relocations are mapped into `Object` where the key is the section
         /// they apply to.
-        fn parseRelocations(self: *Self, gpa: *Allocator) !void {
+        fn parseRelocations(self: *Self, gpa: Allocator) !void {
             const reader = self.reader.reader();
             const section = try leb.readULEB128(u32, reader);
             const count = try leb.readULEB128(u32, reader);
@@ -565,7 +565,7 @@ fn Parser(comptime ReaderType: type) type {
         /// supported will be an error. `payload_size` is required to be able
         /// to calculate the subsections we need to parse, as that data is not
         /// available within the section itself.
-        fn parseMetadata(self: *Self, gpa: *Allocator, payload_size: usize) !void {
+        fn parseMetadata(self: *Self, gpa: Allocator, payload_size: usize) !void {
             var limited = std.io.limitedReader(self.reader.reader(), payload_size);
             const limited_reader = limited.reader();
 
@@ -584,7 +584,7 @@ fn Parser(comptime ReaderType: type) type {
         ///
         /// `self` is used to provide access to other sections that may be needed,
         /// such as access to the `import` section to find the name of a symbol.
-        fn parseSubsection(self: *Self, gpa: *Allocator, reader: anytype) !void {
+        fn parseSubsection(self: *Self, gpa: Allocator, reader: anytype) !void {
             const sub_type = try leb.readULEB128(u8, reader);
             log.debug("Found subsection: {s}", .{@tagName(@intToEnum(types.SubsectionType, sub_type))});
             const payload_len = try leb.readULEB128(u32, reader);
@@ -686,7 +686,7 @@ fn Parser(comptime ReaderType: type) type {
         /// Parses the symbol information based on its kind,
         /// requires access to `Object` to find the name of a symbol when it's
         /// an import and flag `WASM_SYM_EXPLICIT_NAME` is not set.
-        fn parseSymbol(self: *Self, gpa: *Allocator, reader: anytype) !Symbol {
+        fn parseSymbol(self: *Self, gpa: Allocator, reader: anytype) !Symbol {
             const kind = @intToEnum(Symbol.Kind.Tag, try leb.readULEB128(u8, reader));
             const flags = try leb.readULEB128(u32, reader);
             var symbol: Symbol = .{
@@ -733,13 +733,7 @@ fn Parser(comptime ReaderType: type) type {
                     }
 
                     symbol.kind = switch (tag) {
-                        .function => blk: {
-                            const func: *types.Func = if (is_undefined)
-                                &maybe_import.?.kind.function
-                            else
-                                self.object.getFunction(index);
-                            break :blk .{ .function = .{ .index = index, .func = func } };
-                        },
+                        .function => .{ .function = .{ .index = index } },
                         .global => blk: {
                             const global = if (is_undefined)
                                 &maybe_import.?.kind.global
@@ -766,7 +760,7 @@ fn Parser(comptime ReaderType: type) type {
 
 /// First reads the count from the reader and then allocate
 /// a slice of ptr child's element type.
-fn readVec(ptr: anytype, reader: anytype, gpa: *Allocator) ![]ElementType(@TypeOf(ptr)) {
+fn readVec(ptr: anytype, reader: anytype, gpa: Allocator) ![]ElementType(@TypeOf(ptr)) {
     const len = try readLeb(u32, reader);
     const slice = try gpa.alloc(ElementType(@TypeOf(ptr)), len);
     ptr.* = slice;
@@ -826,7 +820,7 @@ fn assertEnd(reader: anytype) !void {
 }
 
 /// Parses an object file into atoms, for code and data sections
-pub fn parseIntoAtoms(self: *Object, gpa: *Allocator, object_index: u16, wasm_bin: *Wasm) !void {
+pub fn parseIntoAtoms(self: *Object, gpa: Allocator, object_index: u16, wasm_bin: *Wasm) !void {
     log.debug("Parsing data section into atoms", .{});
     const Key = struct {
         kind: Symbol.Kind.Tag,
