@@ -5,7 +5,7 @@ const mem = std.mem;
 const io = std.io;
 
 var gpa_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = &gpa_allocator.allocator;
+const gpa = gpa_allocator.allocator();
 
 pub fn log(
     comptime level: std.log.Level,
@@ -44,7 +44,7 @@ pub fn main() !void {
     // we use arena for the arguments and its parsing
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
-    const arena = &arena_allocator.allocator;
+    const arena = arena_allocator.allocator();
 
     const process_args = try std.process.argsAlloc(arena);
     defer std.process.argsFree(arena, process_args);
