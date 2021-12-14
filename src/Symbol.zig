@@ -109,18 +109,6 @@ pub fn setIndex(self: *Symbol, idx: u32) void {
     };
 }
 
-/// Sets the table index for the given symbol.
-/// Asserts the symbol is a function.
-pub fn setTableIndex(self: *Symbol, table_index: u32) void {
-    self.kind.function.table_index = table_index;
-}
-
-/// Returns the table index of the symbol.
-/// Asserts the given symbol is a function symbol.
-pub fn getTableIndex(self: Symbol) ?u32 {
-    return self.kind.function.table_index;
-}
-
 /// Verifies if the given symbol should be imported from the
 /// host environment or not
 pub fn requiresImport(self: Symbol) bool {
@@ -147,16 +135,6 @@ pub const Global = struct {
 
 pub const Function = struct {
     index: u32,
-    /// Pointer to the function representing this symbol
-    // func: *types.Func,
-    /// When set, this function is an indirect function call
-    /// and this index represents its position within the table.
-    table_index: ?u32 = null,
-
-    // Returns the function index within the final binary
-    // pub fn functionIndex(self: Function) u32 {
-    //     return self.func.func_idx;
-    // }
 };
 
 pub const Event = struct {
