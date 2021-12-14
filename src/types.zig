@@ -85,21 +85,6 @@ pub const Import = struct {
     };
 };
 
-pub const Func = struct {
-    /// Index into the list of types
-    type_idx: u32,
-    /// Index into the list of functions
-    func_idx: u32,
-
-    /// Pointer to a `Type`
-    /// This should be the same type that can be found using the `type_idx`
-    /// into the list of types
-    func_type: *const FuncType,
-
-    /// When the function is exported, this field will be set.
-    export_name: ?[]const u8 = null,
-};
-
 pub const Table = struct {
     limits: Limits,
     reftype: RefType,
@@ -131,23 +116,6 @@ pub const Element = struct {
     table_idx: u32,
     offset: InitExpression,
     func_idxs: []const u32,
-};
-
-pub const Code = struct {
-    /// Offset into the code section where the body starts
-    offset: u32,
-    /// Body of the function in bytes
-    data: []u8,
-    /// Pointer to the function this body belongs to
-    func: *const Func,
-};
-
-pub const Data = struct {
-    index: u32,
-    offset: InitExpression,
-    data: []u8,
-    /// Offset within the data section itself
-    seg_offset: u32,
 };
 
 pub const Relocation = struct {

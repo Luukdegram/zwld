@@ -258,9 +258,8 @@ fn emitImport(import_entry: types.Import, writer: anytype) !void {
     }
 }
 
-fn emitFunction(func: types.Func, writer: anytype) !void {
-    log.debug("Writing func with type index: {d}", .{func.type_idx});
-    try leb.writeULEB128(writer, func.type_idx);
+fn emitFunction(func: std.wasm.Func, writer: anytype) !void {
+    try leb.writeULEB128(writer, func.type_index);
 }
 
 fn emitTable(table: types.Table, writer: anytype) !void {

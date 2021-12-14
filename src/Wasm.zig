@@ -310,37 +310,20 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
 
 fn mergeTypes(self: *Wasm, gpa: Allocator) !void {
     log.debug("Merging types", .{});
-    // for (self.objects.items) |object| {
-    //     for (object.types) |wasm_type| {
-    //         // ignore the returned index
-    //         _ = try self.types.append(gpa, wasm_type);
-    //     }
-    // }
-    log.debug("Merged ({d}) types from object files", .{self.types.count()});
-
-    log.debug("Building types from import symbols", .{});
-    //   var imp_it = self.imports.imported_functions.valueIterator();
-    //   while (imp_it.next()) |import| {
-    // import.*.func
-    //   }
-    for (self.imports.symbols()) |sym_with_loc| {
-        const object: Object = self.objects.items[sym_with_loc.file];
-        const symbol = object.symtable[sym_with_loc.sym_index];
-        if (symbol.kind == .function) {
+    for (self.symbol_resolver.values()) |sym_with_loc| {
+        const object = self.objects.items[sym_with_loc.file];
+        const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
+        if (symbol.unwrapAs(.function)) |func_symbol| {
+            if (symbol.isUndefined()) {
+                log.debug("Adding type from extern function '{s}'", .{symbol.name});
+                const value = &self.imports.imported_functions.values()[func_symbol.index];
+                value.type = try self.types.append(gpa, object.types[value.type]);
+                continue;
+            }
             log.debug("Adding type from function '{s}'", .{symbol.name});
-            const value = &self.imports.imported_functions.values()[symbol.index().?];
-            const ty_index = value.type;
-
-            const new_index = try self.types.append(gpa, object.types[ty_index]);
-            value.type = new_index;
+            const func = &self.functions.items.items[func_symbol.index - self.imports.functionCount()];
+            func.type_index = try self.types.append(gpa, object.types[func.type_index]);
         }
-    }
-
-    log.debug("Building types from functions", .{});
-    for (self.functions.items.items) |*func| {
-        const index = try self.types.append(gpa, func.func_type.*);
-        func.type_idx = index;
-        func.func_type = self.types.get(index);
     }
     log.debug("Completed building types. Total count: ({d})", .{self.types.count()});
 }
