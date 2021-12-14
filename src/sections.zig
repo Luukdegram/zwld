@@ -23,11 +23,11 @@ pub const Functions = struct {
     /// Holds the list of function type indexes.
     /// The list is built from merging all defined functions into this single list.
     /// Once appended, it becomes immutable and should not be mutated outside this list.
-    items: std.ArrayListUnmanaged(types.Func) = .{},
+    items: std.ArrayListUnmanaged(std.wasm.Func) = .{},
 
     /// Adds a new function to the section while also setting the function index
     /// of the `Func` itself.
-    pub fn append(self: *Functions, gpa: Allocator, offset: u32, func: types.Func) !u32 {
+    pub fn append(self: *Functions, gpa: Allocator, offset: u32, func: std.wasm.Func) !u32 {
         const index = offset + self.count();
         try self.items.append(gpa, func);
         return index;
@@ -49,15 +49,20 @@ pub const Imports = struct {
     /// Table where the key is represented by an import.
     /// Each entry represents and imported function where the value contains the index of the function
     /// as well as the index of the type.
-    imported_functions: std.StringArrayHashMapUnmanaged(struct { func: u32, type: u32 }) = .{},
+    imported_functions: std.ArrayHashMapUnmanaged(
+        ImportKey,
+        struct { func: u32, type: u32 },
+        ImportKey.Ctx,
+        false,
+    ) = .{},
     /// Table where the key is represented by an import.
     /// Each entry represents an imported global from the host environment and maps to the index
     /// within this map.
-    imported_globals: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
+    imported_globals: std.ArrayHashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, false) = .{},
     /// Table where the key is represented by an import.
     /// Each entry represents an imported table from the host environment and maps to the index
     /// within this map.
-    imported_tables: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
+    imported_tables: std.ArrayHashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, false) = .{},
     /// A list of symbols representing objects that have been imported.
     imported_symbols: std.ArrayListUnmanaged(Wasm.SymbolWithLoc) = .{},
 
@@ -66,7 +71,7 @@ pub const Imports = struct {
         name: []const u8,
 
         const Ctx = struct {
-            pub fn hash(ctx: Ctx, key: ImportKey) u64 {
+            pub fn hash(ctx: Ctx, key: ImportKey) u32 {
                 _ = ctx;
                 const hashFunc = std.hash.autoHash;
                 var hasher = std.hash.Wyhash.init(0);
@@ -74,7 +79,7 @@ pub const Imports = struct {
                 hashFunc(&hasher, key.module_name.ptr);
                 hashFunc(&hasher, key.name.len);
                 hashFunc(&hasher, key.name.ptr);
-                return hasher.final();
+                return @truncate(u32, hasher.final());
             }
 
             pub fn eql(ctx: Ctx, lhs: ImportKey, rhs: ImportKey) bool {
@@ -99,24 +104,22 @@ pub const Imports = struct {
     ) !void {
         const object: *Object = &wasm.objects.items[sym_with_loc.file];
         const symbol = &object.symtable[sym_with_loc.sym_index];
-        // const import = object.imports[symbol.index().?];
         const import = object.findImport(Symbol.Kind.Tag.externalType(symbol.kind), symbol.index().?);
         const module_name = import.module_name;
         const import_name = symbol.name;
 
         switch (symbol.kind) {
             .function => |*func| {
-                const key = try std.mem.concat(gpa, u8, &.{ module_name, ".", import_name });
-                const ret = try self.imported_functions.getOrPut(gpa, key);
+                const ret = try self.imported_functions.getOrPut(gpa, .{
+                    .module_name = module_name,
+                    .name = import_name,
+                });
                 if (!ret.found_existing) {
                     try self.imported_symbols.append(gpa, sym_with_loc);
                     ret.value_ptr.* = .{
                         .func = @intCast(u32, self.imported_functions.count() - 1),
                         .type = import.kind.function,
                     };
-                } else {
-                    // if key already exists, simply free it
-                    gpa.free(key);
                 }
                 symbol.setIndex(ret.value_ptr.*.func);
                 log.debug("Imported function '{s}' at index ({d})", .{ import_name, func.index });
@@ -165,7 +168,6 @@ pub const Imports = struct {
     }
 
     pub fn deinit(self: *Imports, gpa: Allocator) void {
-        for (self.imported_functions.keys()) |key| gpa.free(key);
         self.imported_functions.deinit(gpa);
         self.imported_globals.deinit(gpa);
         self.imported_tables.deinit(gpa);

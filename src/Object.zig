@@ -30,7 +30,7 @@ types: []const types.FuncType = &.{},
 /// A list of all imports for this module
 imports: []types.Import = &.{},
 /// Parsed function section
-functions: []types.Func = &.{},
+functions: []std.wasm.Func = &.{},
 /// Parsed table section
 tables: []types.Table = &.{},
 /// Parsed memory section
@@ -149,11 +149,11 @@ pub fn importedCountByKind(self: *const Object, kind: std.wasm.ExternalKind) u32
 }
 
 /// Returns a function by a given id, rather than its index within the list.
-pub fn getFunction(self: *const Object, id: u32) *types.Func {
-    return for (self.functions) |*func| {
-        if (func.func_idx == id) break func;
-    } else unreachable;
-}
+// pub fn getFunction(self: *const Object, id: u32) *std.wasm.Func {
+//     return for (self.functions) |*func| {
+//         if (func.func_idx == id) break func;
+//     } else unreachable;
+// }
 
 /// Returns a global by a given id, rather than by its index within the list.
 pub fn getGlobal(self: *const Object, id: u32) *types.Global {
@@ -376,12 +376,8 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .function => {
-                        for (try readVec(&self.object.functions, reader, gpa)) |*func, index| {
-                            func.* = .{
-                                .type_idx = try readLeb(u32, reader),
-                                .func_idx = @intCast(u32, index + self.object.importedCountByKind(.function)),
-                                .func_type = &self.object.types[func.type_idx],
-                            };
+                        for (try readVec(&self.object.functions, reader, gpa)) |*func| {
+                            func.* = .{ .type_index = try readLeb(u32, reader) };
                         }
                         try assertEnd(reader);
                     },
@@ -422,10 +418,6 @@ fn Parser(comptime ReaderType: type) type {
                                 .kind = try readEnum(std.wasm.ExternalKind, reader),
                                 .index = try readLeb(u32, reader),
                             };
-
-                            if (exp.kind == .function) {
-                                self.object.functions[exp.index].export_name = name;
-                            }
                         }
                         try assertEnd(reader);
                     },
