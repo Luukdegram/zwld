@@ -205,7 +205,8 @@ pub const Globals = struct {
     pub fn addGOTEntry(self: *Globals, gpa: Allocator, symbol: *Symbol, wasm_bin: *Wasm) !void {
         if (symbol.kind == .function) {
             try wasm_bin.tables.createIndirectFunctionTable(gpa, wasm_bin);
-            try wasm_bin.elements.appendSymbol(gpa, symbol);
+            // try wasm_bin.elements.appendSymbol(gpa, symbol);
+            @panic("TODO: Implement GOT entries");
         }
 
         try self.got_symbols.append(gpa, symbol);
@@ -391,24 +392,22 @@ pub const Exports = struct {
 };
 
 pub const Elements = struct {
-    /// A list of symbols for indirect function calls
-    indirect_functions: std.ArrayListUnmanaged(*Symbol) = .{},
+    /// A list of symbols for indirect function calls where the key
+    /// represents the symbol location, and the value represents the table index.
+    indirect_functions: std.AutoArrayHashMapUnmanaged(Wasm.SymbolWithLoc, u32) = .{},
 
     /// Appends a function symbol to the list of indirect function calls.
     /// The table index will be set on the symbol, based on the length
     ///
     /// Asserts symbol represents a function.
-    pub fn appendSymbol(self: *Elements, gpa: Allocator, symbol: *Symbol) !void {
-        // Check if symbol is already part of the indirect function table
-        if (symbol.kind.function.table_index != null) {
-            return;
-        }
-        symbol.kind.function.table_index = @intCast(u32, self.indirect_functions.items.len);
-        try self.indirect_functions.append(gpa, symbol);
+    pub fn appendSymbol(self: *Elements, gpa: Allocator, symbol_loc: Wasm.SymbolWithLoc) !void {
+        const gop = try self.indirect_functions.getOrPut(gpa, symbol_loc);
+        if (gop.found_existing) return;
+        gop.value_ptr.* = self.functionCount();
     }
 
     pub fn functionCount(self: Elements) u32 {
-        return @intCast(u32, self.indirect_functions.items.len);
+        return @intCast(u32, self.indirect_functions.count());
     }
 
     pub fn deinit(self: *Elements, gpa: Allocator) void {

@@ -97,7 +97,7 @@ pub fn emit(wasm: *Wasm) !void {
     if (wasm.elements.functionCount() != 0) {
         log.debug("Writing 'Element' section (1)", .{});
         const offset = try reserveSectionHeader(file);
-        try emitElement(wasm.elements, writer);
+        try emitElement(wasm, writer);
         try emitSectionHeader(file, offset, .element, 1);
     }
     if (wasm.code_section_index) |index| {
@@ -306,7 +306,7 @@ fn emitExport(exported: types.Export, writer: anytype) !void {
     try leb.writeULEB128(writer, exported.index);
 }
 
-fn emitElement(element: @import("sections.zig").Elements, writer: anytype) !void {
+fn emitElement(wasm: *const Wasm, writer: anytype) !void {
     var flags: u32 = 0;
     var index: ?u32 = if (Symbol.linker_defined.indirect_function_table) |symbol| blk: {
         flags |= 0x2;
@@ -321,9 +321,9 @@ fn emitElement(element: @import("sections.zig").Elements, writer: anytype) !void
         try leb.writeULEB128(writer, @as(u8, 0));
     }
 
-    try leb.writeULEB128(writer, element.functionCount());
-    for (element.indirect_functions.items) |symbol, el_index| {
-        std.debug.assert(symbol.kind.function.table_index.? == el_index);
-        // try leb.writeULEB128(writer, symbol.kind.function.functionIndex());
+    try leb.writeULEB128(writer, wasm.elements.functionCount());
+    for (wasm.elements.indirect_functions.keys()) |sym_with_loc| {
+        const symbol = wasm.objects.items[sym_with_loc.file].symtable[sym_with_loc.sym_index];
+        try leb.writeULEB128(writer, symbol.index().?);
     }
 }

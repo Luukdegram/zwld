@@ -148,7 +148,7 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
         .R_WASM_TABLE_INDEX_I64,
         .R_WASM_TABLE_INDEX_SLEB,
         .R_WASM_TABLE_INDEX_SLEB64,
-        => symbol.getTableIndex() orelse 0,
+        => wasm_bin.elements.indirect_functions.get(symbol_loc) orelse 0,
         .R_WASM_TYPE_INDEX_LEB => wasm_bin.functions.items.items[symbol.index().?].type_index,
         .R_WASM_GLOBAL_INDEX_I32,
         .R_WASM_GLOBAL_INDEX_LEB,
