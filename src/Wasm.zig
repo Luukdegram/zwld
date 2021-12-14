@@ -264,7 +264,7 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
     for (self.symbol_resolver.values()) |sym_with_loc| {
         const object: Object = self.objects.items[sym_with_loc.file];
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
-
+        if (symbol.isUndefined()) continue; // skip imports
         switch (symbol.kind) {
             .function => |func| {
                 const offset = object.importedCountByKind(.function);
@@ -274,9 +274,6 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
                     self.imports.functionCount(),
                     original_func,
                 );
-                log.debug("Merging function '{s}'", .{symbol.name});
-                log.debug("  initial index: {d}", .{symbol.index()});
-                log.debug("  new index:     {d}", .{new_index});
                 symbol.setIndex(new_index);
             },
             else => {},
@@ -313,24 +310,29 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
 
 fn mergeTypes(self: *Wasm, gpa: Allocator) !void {
     log.debug("Merging types", .{});
-    for (self.objects.items) |object| {
-        for (object.types) |wasm_type| {
-            // ignore the returned index
-            _ = try self.types.append(gpa, wasm_type);
-        }
-    }
+    // for (self.objects.items) |object| {
+    //     for (object.types) |wasm_type| {
+    //         // ignore the returned index
+    //         _ = try self.types.append(gpa, wasm_type);
+    //     }
+    // }
     log.debug("Merged ({d}) types from object files", .{self.types.count()});
 
     log.debug("Building types from import symbols", .{});
+    //   var imp_it = self.imports.imported_functions.valueIterator();
+    //   while (imp_it.next()) |import| {
+    // import.*.func
+    //   }
     for (self.imports.symbols()) |sym_with_loc| {
-        const object = self.objects.items[sym_with_loc.file];
+        const object: Object = self.objects.items[sym_with_loc.file];
         const symbol = object.symtable[sym_with_loc.sym_index];
         if (symbol.kind == .function) {
             log.debug("Adding type from function '{s}'", .{symbol.name});
-            // ignore the returned index. type will only be appended if it does
-            // not exist yet.
-            // const type_index = self.functions.items.items[symbol.index().?].type_idx;
-            // _ = try self.types.append(gpa, self.types.get
+            const value = &self.imports.imported_functions.values()[symbol.index().?];
+            const ty_index = value.type;
+
+            const new_index = try self.types.append(gpa, object.types[ty_index]);
+            value.type = new_index;
         }
     }
 
@@ -359,15 +361,10 @@ fn setupExports(self: *Wasm, gpa: Allocator) !void {
 
         var name: []const u8 = symbol.name;
         var exported: types.Export = undefined;
-        if (symbol.unwrapAs(.function)) |_| {
-            // func cannot be `null` because only defined functions
-            // can be exported, which is verified with `isExported()`
-            // if (func.func.export_name) |export_name| {
-            //     name = export_name;
-            // }
-            exported = .{ .name = name, .kind = .function, .index = symbol.index().? };
+        if (symbol.unwrapAs(.function)) |func| {
+            exported = .{ .name = name, .kind = .function, .index = func.index };
         } else {
-            log.debug("TODO: Export non-functions type({s}) name={s}", .{
+            log.warn("TODO: Export non-functions type({s}) name={s}", .{
                 @tagName(std.meta.activeTag(symbol.kind)),
                 name,
             });
@@ -455,23 +452,6 @@ fn mergeImports(self: *Wasm, gpa: Allocator) !void {
             try self.imports.appendSymbol(gpa, self, sym_with_loc);
         }
     }
-    // for (self.objects.items) |object, obj_idx| {
-    //     for (object.symtable) |*symbol, sym_idx| {
-    //         if (symbol.kind != .data) {
-    //             if (!symbol.requiresImport()) {
-    //                 continue;
-    //             }
-    //             if (Symbol.linker_defined.indirect_function_table) |table| {
-    //                 if (symbol == table) continue;
-    //             }
-    //             log.debug("Symbol '{s}' will be imported", .{symbol.name});
-    //             try self.imports.appendSymbol(gpa, self, .{
-    //                 .file = @intCast(u16, obj_idx),
-    //                 .sym_index = @intCast(u32, sym_idx),
-    //             });
-    //         }
-    //     }
-    // }
 }
 
 /// Sets up the memory section of the wasm module, as well as the stack.

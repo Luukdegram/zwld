@@ -353,16 +353,7 @@ fn Parser(comptime ReaderType: type) type {
 
                             const kind = try readEnum(std.wasm.ExternalKind, reader);
                             const kind_value: types.Import.Kind = switch (kind) {
-                                .function => .{
-                                    .function = blk: {
-                                        const type_index = try readLeb(u32, reader);
-                                        break :blk types.Func{
-                                            .type_idx = type_index,
-                                            .func_idx = @intCast(u32, index),
-                                            .func_type = &self.object.types[type_index],
-                                        };
-                                    },
-                                },
+                                .function => .{ .function = try readLeb(u32, reader) },
                                 .memory => .{ .memory = try readLimits(reader) },
                                 .global => .{ .global = .{
                                     .valtype = try readEnum(std.wasm.Valtype, reader),

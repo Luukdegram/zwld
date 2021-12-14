@@ -47,8 +47,9 @@ pub const Functions = struct {
 /// Output import section, containing all the various import types
 pub const Imports = struct {
     /// Table where the key is represented by an import.
-    /// Each entry represents an imported function, and maps to the index within this map
-    imported_functions: std.HashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, max_load) = .{},
+    /// Each entry represents and imported function where the value contains the index of the function
+    /// as well as the index of the type.
+    imported_functions: std.StringArrayHashMapUnmanaged(struct { func: u32, type: u32 }) = .{},
     /// Table where the key is represented by an import.
     /// Each entry represents an imported global from the host environment and maps to the index
     /// within this map.
@@ -98,21 +99,26 @@ pub const Imports = struct {
     ) !void {
         const object: *Object = &wasm.objects.items[sym_with_loc.file];
         const symbol = &object.symtable[sym_with_loc.sym_index];
-        const module_name = object.imports[symbol.index().?].module_name;
+        // const import = object.imports[symbol.index().?];
+        const import = object.findImport(Symbol.Kind.Tag.externalType(symbol.kind), symbol.index().?);
+        const module_name = import.module_name;
         const import_name = symbol.name;
 
         switch (symbol.kind) {
             .function => |*func| {
-                const ret = try self.imported_functions.getOrPut(gpa, .{
-                    .module_name = module_name,
-                    .name = import_name,
-                });
+                const key = try std.mem.concat(gpa, u8, &.{ module_name, ".", import_name });
+                const ret = try self.imported_functions.getOrPut(gpa, key);
                 if (!ret.found_existing) {
                     try self.imported_symbols.append(gpa, sym_with_loc);
-                    ret.value_ptr.* = @intCast(u32, self.imported_functions.count() - 1);
+                    ret.value_ptr.* = .{
+                        .func = @intCast(u32, self.imported_functions.count() - 1),
+                        .type = import.kind.function,
+                    };
+                } else {
+                    // if key already exists, simply free it
+                    gpa.free(key);
                 }
-                symbol.setIndex(ret.value_ptr.*);
-                // func.func.func_idx = ret.value_ptr.*;
+                symbol.setIndex(ret.value_ptr.*.func);
                 log.debug("Imported function '{s}' at index ({d})", .{ import_name, func.index });
             },
             .global => |*global| {
@@ -159,6 +165,7 @@ pub const Imports = struct {
     }
 
     pub fn deinit(self: *Imports, gpa: Allocator) void {
+        for (self.imported_functions.keys()) |key| gpa.free(key);
         self.imported_functions.deinit(gpa);
         self.imported_globals.deinit(gpa);
         self.imported_tables.deinit(gpa);

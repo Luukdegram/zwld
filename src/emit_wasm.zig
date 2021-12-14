@@ -44,8 +44,7 @@ pub fn emit(wasm: *Wasm) !void {
         }
 
         for (wasm.imports.symbols()) |sym_with_loc| {
-            const object = wasm.objects.items[sym_with_loc.file];
-            try emitImportSymbol(object, sym_with_loc.sym_index, writer);
+            try emitImportSymbol(wasm, sym_with_loc.file, sym_with_loc.sym_index, writer);
         }
 
         // TODO: Also emit GOT symbols
@@ -218,7 +217,8 @@ fn emitType(type_entry: types.FuncType, writer: anytype) !void {
     }
 }
 
-fn emitImportSymbol(object: Object, symbol_index: u32, writer: anytype) !void {
+fn emitImportSymbol(wasm: *const Wasm, object_index: u16, symbol_index: u32, writer: anytype) !void {
+    const object = wasm.objects.items[object_index];
     const symbol = object.symtable[symbol_index];
     var import: types.Import = .{
         .module_name = object.imports[symbol.index().?].module_name,
@@ -227,7 +227,10 @@ fn emitImportSymbol(object: Object, symbol_index: u32, writer: anytype) !void {
     };
 
     switch (symbol.kind) {
-        // .function => |func| import.kind = .{ .function = func.func.* },
+        .function => |func| {
+            const value = wasm.imports.imported_functions.values()[func.index];
+            import.kind = .{ .function = value.type };
+        },
         .global => |global| import.kind = .{ .global = global.global.* },
         .table => |table| import.kind = .{ .table = table.table.* },
         else => unreachable,
@@ -245,7 +248,7 @@ fn emitImport(import_entry: types.Import, writer: anytype) !void {
 
     try leb.writeULEB128(writer, @enumToInt(import_entry.kind));
     switch (import_entry.kind) {
-        .function => |func| try leb.writeULEB128(writer, func.type_idx),
+        .function => |type_index| try leb.writeULEB128(writer, type_index),
         .table => |table| try emitTable(table, writer),
         .global => |global| {
             try leb.writeULEB128(writer, @enumToInt(global.valtype));
