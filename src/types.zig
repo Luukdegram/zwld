@@ -78,7 +78,7 @@ pub const Import = struct {
     kind: Kind,
 
     pub const Kind = union(wasm.ExternalKind) {
-        function: Func,
+        function: u32,
         table: Table,
         memory: Limits,
         global: Global,
