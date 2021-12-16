@@ -135,14 +135,9 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
     const object = wasm_bin.objects.items[self.file];
     const symbol: Symbol = object.symtable[relocation.index];
     const symbol_loc = wasm_bin.symbol_resolver.get(symbol.name).?;
-    const actual_symbol = wasm_bin.objects.items[symbol_loc.file].symtable[symbol_loc.sym_index];
+    const actual_symbol = symbol_loc.getSymbol(wasm_bin);
     return switch (relocation.relocation_type) {
-        .R_WASM_FUNCTION_INDEX_LEB => blk: {
-            log.debug("Calculating value of symbol '{s}'", .{symbol.name});
-            log.debug("  original index: {d}", .{symbol.index()});
-            log.debug("  new index: {d}", .{actual_symbol.index()});
-            break :blk actual_symbol.index().?;
-        },
+        .R_WASM_FUNCTION_INDEX_LEB => actual_symbol.index().?,
         .R_WASM_TABLE_NUMBER_LEB => symbol.kind.table.table.table_idx,
         .R_WASM_TABLE_INDEX_I32,
         .R_WASM_TABLE_INDEX_I64,
@@ -152,7 +147,7 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
         .R_WASM_TYPE_INDEX_LEB => wasm_bin.functions.items.items[symbol.index().?].type_index,
         .R_WASM_GLOBAL_INDEX_I32,
         .R_WASM_GLOBAL_INDEX_LEB,
-        => symbol.kind.global.global.global_idx,
+        => actual_symbol.index().?,
         .R_WASM_MEMORY_ADDR_I32,
         .R_WASM_MEMORY_ADDR_I64,
         .R_WASM_MEMORY_ADDR_LEB,
