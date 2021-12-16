@@ -51,14 +51,19 @@ pub const Imports = struct {
     /// as well as the index of the type.
     imported_functions: std.ArrayHashMapUnmanaged(
         ImportKey,
-        struct { func: u32, type: u32 },
+        struct { index: u32, type: u32 },
         ImportKey.Ctx,
         false,
     ) = .{},
     /// Table where the key is represented by an import.
     /// Each entry represents an imported global from the host environment and maps to the index
     /// within this map.
-    imported_globals: std.ArrayHashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, false) = .{},
+    imported_globals: std.ArrayHashMapUnmanaged(
+        ImportKey,
+        struct { index: u32, global: std.wasm.GlobalType },
+        ImportKey.Ctx,
+        false,
+    ) = .{},
     /// Table where the key is represented by an import.
     /// Each entry represents an imported table from the host environment and maps to the index
     /// within this map.
@@ -102,7 +107,7 @@ pub const Imports = struct {
         wasm: *const Wasm,
         sym_with_loc: Wasm.SymbolWithLoc,
     ) !void {
-        const object: *Object = &wasm.objects.items[sym_with_loc.file];
+        const object: *Object = &wasm.objects.items[sym_with_loc.file.?];
         const symbol = &object.symtable[sym_with_loc.sym_index];
         const import = object.findImport(Symbol.Kind.Tag.externalType(symbol.kind), symbol.index().?);
         const module_name = import.module_name;
@@ -117,11 +122,11 @@ pub const Imports = struct {
                 if (!ret.found_existing) {
                     try self.imported_symbols.append(gpa, sym_with_loc);
                     ret.value_ptr.* = .{
-                        .func = @intCast(u32, self.imported_functions.count() - 1),
+                        .index = self.functionCount() - 1,
                         .type = import.kind.function,
                     };
                 }
-                symbol.setIndex(ret.value_ptr.*.func);
+                symbol.setIndex(ret.value_ptr.*.index);
                 log.debug("Imported function '{s}' at index ({d})", .{ import_name, func.index });
             },
             .global => |*global| {
@@ -131,9 +136,12 @@ pub const Imports = struct {
                 });
                 if (!ret.found_existing) {
                     try self.imported_symbols.append(gpa, sym_with_loc);
-                    ret.value_ptr.* = @intCast(u32, self.imported_globals.count() - 1);
+                    ret.value_ptr.* = .{
+                        .index = self.globalCount() - 1,
+                        .global = import.kind.global,
+                    };
                 }
-                global.global.global_idx = ret.value_ptr.*;
+                symbol.setIndex(ret.value_ptr.*.index);
                 log.debug("Imported global '{s}' at index ({d})", .{ import_name, global.index });
             },
             .table => |*table| {
@@ -190,15 +198,16 @@ pub const Imports = struct {
 pub const Globals = struct {
     /// A list of `wasm.Global`s
     /// Once appended to this list, they should no longer be mutated
-    items: std.ArrayListUnmanaged(types.Global) = .{},
+    items: std.ArrayListUnmanaged(std.wasm.Global) = .{},
     /// List of internal GOT symbols
     got_symbols: std.ArrayListUnmanaged(*Symbol) = .{},
 
     /// Appends a new global and sets the `global_idx` on the global based on the
     /// current count of globals and the given `offset`.
-    pub fn append(self: *Globals, gpa: Allocator, offset: u32, global: *types.Global) !void {
-        global.global_idx = offset + self.count();
-        try self.items.append(gpa, global.*);
+    pub fn append(self: *Globals, gpa: Allocator, offset: u32, global: std.wasm.Global) !u32 {
+        const index = offset + @intCast(u32, self.items.items.len);
+        try self.items.append(gpa, global);
+        return index;
     }
 
     /// Appends a new entry to the internal GOT

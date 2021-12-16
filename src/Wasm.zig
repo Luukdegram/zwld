@@ -28,7 +28,7 @@ managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 atoms: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 /// All symbols created by the linker, rather than through
 /// object files will be inserted in this list to manage them.
-synthetic_symbols: std.StringHashMapUnmanaged(SymbolWithLoc) = .{},
+synthetic_symbols: std.StringArrayHashMapUnmanaged(Symbol) = .{},
 /// Mapping between symbol names and their respective location
 /// This map contains all symbols that will be written into the final binary.
 symbol_resolver: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
@@ -70,9 +70,21 @@ pub const Segment = struct {
     offset: u32,
 };
 
+/// Describes the location of a symbol
 pub const SymbolWithLoc = struct {
+    /// Symbol entry index within the object/binary file
     sym_index: u32,
-    file: u16,
+    /// When file is `null`, this symbol refers to a synthetic symbol.
+    file: ?u16,
+
+    /// From a given location, find the corresponding symbol in the wasm binary.
+    pub fn getSymbol(self: SymbolWithLoc, wasm: *const Wasm) *Symbol {
+        if (self.file) |file_index| {
+            const object = wasm.objects.items[file_index];
+            return &object.symtable[self.sym_index];
+        }
+        return &wasm.synthetic_symbols.values()[self.sym_index];
+    }
 };
 
 /// Options to pass to our linker which affects
@@ -169,13 +181,13 @@ pub fn dataCount(self: Wasm) u32 {
 /// Flushes the `Wasm` construct into a final wasm binary by linking
 /// the objects, ensuring the final binary file has no collisions.
 pub fn flush(self: *Wasm, gpa: Allocator) !void {
+    try self.setupLinkerSymbols(gpa);
     for (self.objects.items) |_, obj_idx| {
         try self.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
     for (self.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
     }
-    try self.setupLinkerSymbols(gpa);
     try self.setupStart();
     try self.mergeImports(gpa);
     try self.allocateAtoms();
@@ -211,10 +223,6 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
             Symbol.linker_defined.indirect_function_table == null)
         {
             Symbol.linker_defined.indirect_function_table = symbol;
-            try self.synthetic_symbols.putNoClobber(gpa, symbol.name, .{
-                .sym_index = sym_idx,
-                .file = object_index,
-            });
         }
 
         if (symbol.kind == .table) continue;
@@ -235,12 +243,12 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
         }
 
         const existing_loc = maybe_existing.value_ptr.*;
-        const existing_sym: Symbol = self.objects.items[existing_loc.file].symtable[existing_loc.sym_index];
+        const existing_sym: *Symbol = existing_loc.getSymbol(self);
 
         if (!existing_sym.isUndefined()) {
-            if (existing_sym.isGlobal() and symbol.isGlobal()) {
+            if (existing_sym.isGlobal() and symbol.isGlobal() and !symbol.isUndefined()) {
                 log.err("symbol '{s}' defined multiple times", .{existing_sym.name});
-                log.err("  first definition in '{s}'", .{self.objects.items[existing_loc.file].name});
+                log.err("  first definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
                 log.err("  next definition in '{s}'", .{object.name});
                 return error.SymbolCollision;
             }
@@ -252,7 +260,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
 
         // simply overwrite with the new symbol
         log.info("Overwriting symbol '{s}'", .{symbol.name});
-        log.info("  first definition in '{s}'", .{self.objects.items[existing_loc.file].name});
+        log.info("  first definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
         log.info("  next definition in '{s}'", .{object.name});
         maybe_existing.value_ptr.* = location;
     }
@@ -260,38 +268,35 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
 
 /// Calculates the new indexes for symbols and their respective symbols
 fn mergeSections(self: *Wasm, gpa: Allocator) !void {
-    log.debug("Merging functions", .{});
+    log.debug("Merging sections", .{});
     for (self.symbol_resolver.values()) |sym_with_loc| {
-        const object: Object = self.objects.items[sym_with_loc.file];
+        const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
         if (symbol.isUndefined()) continue; // skip imports
         switch (symbol.kind) {
-            .function => |func| {
+            .function => |*func| {
                 const offset = object.importedCountByKind(.function);
                 const original_func = object.functions[func.index - offset];
-                const new_index = try self.functions.append(
+                func.index = try self.functions.append(
                     gpa,
                     self.imports.functionCount(),
                     original_func,
                 );
-                symbol.setIndex(new_index);
+            },
+            .global => |*global| {
+                const offset = object.importedCountByKind(.global);
+                const original_global = object.globals[global.index - offset];
+                global.index = try self.globals.append(
+                    gpa,
+                    self.imports.globalCount(),
+                    original_global,
+                );
             },
             else => {},
         }
     }
     log.debug("Merged ({d}) functions", .{self.functions.count()});
-
-    // merge globals
-    {
-        log.debug("Merging globals", .{});
-        for (self.objects.items) |object| {
-            for (object.globals) |*global| {
-                try self.globals.append(gpa, self.imports.globalCount(), global);
-            }
-        }
-
-        log.debug("Merged ({d}) globals", .{self.globals.count()});
-    }
+    log.debug("Merged ({d}) globals", .{self.globals.count()});
 
     // merge tables
     {
@@ -311,7 +316,7 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
 fn mergeTypes(self: *Wasm, gpa: Allocator) !void {
     log.debug("Merging types", .{});
     for (self.symbol_resolver.values()) |sym_with_loc| {
-        const object = self.objects.items[sym_with_loc.file];
+        const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
         if (symbol.unwrapAs(.function)) |func_symbol| {
             if (symbol.isUndefined()) {
@@ -365,18 +370,26 @@ fn setupExports(self: *Wasm, gpa: Allocator) !void {
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
 fn setupLinkerSymbols(self: *Wasm, gpa: Allocator) !void {
-    // Create symbol for our stack pointer
-    const stack_symbol = &Symbol.linker_defined.stack_pointer;
+    var symbol: Symbol = .{
+        .flags = 0,
+        .name = "__stack_pointer",
+        .kind = .{ .global = .{
+            .index = 0,
+        } },
+    };
 
-    stack_symbol.* = if (self.global_symbols.get("__stack_pointer")) |sym_with_loc| blk: {
-        // TODO: Make this a lot nicer by logic to replace symbols
-        const object = self.objects.items[sym_with_loc.file];
-        const symbol = &object.symtable[sym_with_loc.sym_index];
-        symbol.setUndefined(false);
-        try self.globals.append(gpa, 0, symbol.kind.global.global);
-        symbol.kind.global.global = &self.globals.items.items[self.globals.count() - 1];
-        break :blk symbol;
-    } else null;
+    const global: std.wasm.Global = .{
+        .init = .{ .i32_const = 0 },
+        .global_type = .{ .valtype = .i32, .mutable = true },
+    };
+
+    const target_index = try self.globals.append(gpa, 0, global);
+    symbol.setIndex(target_index);
+
+    const sym_index = @intCast(u32, self.synthetic_symbols.count());
+    const loc: SymbolWithLoc = .{ .sym_index = sym_index, .file = null };
+    try self.synthetic_symbols.putNoClobber(gpa, symbol.name, symbol);
+    try self.symbol_resolver.putNoClobber(gpa, symbol.name, loc);
 }
 
 const SymbolIterator = struct {
@@ -415,7 +428,7 @@ const SymbolIterator = struct {
 
 fn mergeImports(self: *Wasm, gpa: Allocator) !void {
     if (self.options.import_table) {
-        const sym_with_loc = self.synthetic_symbols.get(Symbol.linker_defined.names.indirect_function_table) orelse {
+        const sym_with_loc = self.symbol_resolver.get(Symbol.linker_defined.names.indirect_function_table) orelse {
             log.err("Required import __indirect_function_table is missing from object files", .{});
             return error.MissingSymbol;
         };
@@ -423,7 +436,7 @@ fn mergeImports(self: *Wasm, gpa: Allocator) !void {
     }
 
     for (self.symbol_resolver.values()) |sym_with_loc| {
-        const symbol = &self.objects.items[sym_with_loc.file].symtable[sym_with_loc.sym_index];
+        const symbol = sym_with_loc.getSymbol(self);
         if (symbol.kind != .data) {
             if (!symbol.requiresImport()) {
                 continue;
@@ -504,8 +517,8 @@ fn setupMemory(self: *Wasm) !void {
     }
 
     // set stack value on global
-    if (Symbol.linker_defined.stack_pointer) |stack_pointer| {
-        const global: *types.Global = stack_pointer.kind.global.global;
+    if (self.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
+        const global: *std.wasm.Global = &self.globals.items.items[stack_pointer.index().?];
         global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
     }
 }
@@ -609,9 +622,7 @@ fn setupStart(self: *Wasm) !void {
         log.err("Entry symbol '{s}' does not exist, use '--no-entry' to suppress", .{entry_name});
         return error.MissingSymbol;
     };
-    const object = self.objects.items[symbol_with_loc.file];
-    const symbol: *Symbol = &object.symtable[symbol_with_loc.sym_index];
-
+    const symbol = symbol_with_loc.getSymbol(self);
     if (symbol.kind != .function) {
         log.err("Entry symbol '{s}' is not a function", .{entry_name});
         return error.InvalidEntryKind;

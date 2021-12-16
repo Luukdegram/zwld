@@ -81,7 +81,7 @@ pub const Import = struct {
         function: u32,
         table: Table,
         memory: Limits,
-        global: Global,
+        global: std.wasm.GlobalType,
     };
 };
 

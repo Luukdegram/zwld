@@ -36,11 +36,11 @@ tables: []types.Table = &.{},
 /// Parsed memory section
 memories: []const types.Memory = &.{},
 /// Parsed global section
-globals: []types.Global = &.{},
+globals: []std.wasm.Global = &.{},
 /// Parsed export section
 exports: []const types.Export = &.{},
 /// Parsed element section
-elements: []const types.Element = &.{},
+elements: []const std.wasm.Element = &.{},
 /// Represents the function ID that must be called on startup.
 /// This is `null` by default as runtimes may determine the startup
 /// function themselves. This is essentially legacy.
@@ -146,20 +146,6 @@ pub fn importedCountByKind(self: *const Object, kind: std.wasm.ExternalKind) u32
     return for (self.imports) |imp| {
         if (@as(std.wasm.ExternalKind, imp.kind) == kind) i += 1;
     } else i;
-}
-
-/// Returns a function by a given id, rather than its index within the list.
-// pub fn getFunction(self: *const Object, id: u32) *std.wasm.Func {
-//     return for (self.functions) |*func| {
-//         if (func.func_idx == id) break func;
-//     } else unreachable;
-// }
-
-/// Returns a global by a given id, rather than by its index within the list.
-pub fn getGlobal(self: *const Object, id: u32) *types.Global {
-    return for (self.globals) |*global| {
-        if (global.global_idx == id) break global;
-    } else unreachable;
 }
 
 /// Returns a table by a given id, rather than by its index within the list.
@@ -358,7 +344,6 @@ fn Parser(comptime ReaderType: type) type {
                                 .global => .{ .global = .{
                                     .valtype = try readEnum(std.wasm.Valtype, reader),
                                     .mutable = (try reader.readByte()) == 0x01,
-                                    .global_idx = @intCast(u32, index),
                                 } },
                                 .table => .{ .table = .{
                                     .reftype = try readEnum(types.RefType, reader),
@@ -398,12 +383,13 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .global => {
-                        for (try readVec(&self.object.globals, reader, gpa)) |*global, index| {
+                        for (try readVec(&self.object.globals, reader, gpa)) |*global| {
                             global.* = .{
-                                .valtype = try readEnum(std.wasm.Valtype, reader),
-                                .mutable = (try reader.readByte()) == 0x01,
+                                .global_type = .{
+                                    .valtype = try readEnum(std.wasm.Valtype, reader),
+                                    .mutable = (try reader.readByte()) == 0x01,
+                                },
                                 .init = try readInit(reader),
-                                .global_idx = @intCast(u32, index + self.object.importedCountByKind(.global)),
                             };
                         }
                         try assertEnd(reader);
@@ -427,10 +413,10 @@ fn Parser(comptime ReaderType: type) type {
                     },
                     .element => {
                         for (try readVec(&self.object.elements, reader, gpa)) |*elem| {
-                            elem.table_idx = try readLeb(u32, reader);
+                            elem.table_index = try readLeb(u32, reader);
                             elem.offset = try readInit(reader);
 
-                            for (try readVec(&elem.func_idxs, reader, gpa)) |*idx| {
+                            for (try readVec(&elem.func_indexes, reader, gpa)) |*idx| {
                                 idx.* = try readLeb(u32, reader);
                             }
                         }
@@ -717,13 +703,7 @@ fn Parser(comptime ReaderType: type) type {
 
                     symbol.kind = switch (tag) {
                         .function => .{ .function = .{ .index = index } },
-                        .global => blk: {
-                            const global = if (is_undefined)
-                                &maybe_import.?.kind.global
-                            else
-                                self.object.getGlobal(index);
-                            break :blk .{ .global = .{ .index = index, .global = global } };
-                        },
+                        .global => .{ .global = .{ .index = index } },
                         .table => blk: {
                             const table = if (is_undefined)
                                 &maybe_import.?.kind.table
@@ -783,12 +763,12 @@ fn readLimits(reader: anytype) !types.Limits {
     };
 }
 
-fn readInit(reader: anytype) !types.InitExpression {
+fn readInit(reader: anytype) !std.wasm.InitExpression {
     const opcode = try reader.readByte();
-    const init_expr: types.InitExpression = switch (@intToEnum(std.wasm.Opcode, opcode)) {
+    const init_expr: std.wasm.InitExpression = switch (@intToEnum(std.wasm.Opcode, opcode)) {
         .i32_const => .{ .i32_const = try readLeb(i32, reader) },
         .global_get => .{ .global_get = try readLeb(u32, reader) },
-        else => unreachable,
+        else => @panic("TODO: initexpression for other opcodes"),
     };
 
     if ((try readEnum(std.wasm.Opcode, reader)) != .end) return error.MissingEndForExpression;

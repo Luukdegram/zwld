@@ -128,9 +128,6 @@ pub const Data = struct {
 
 pub const Global = struct {
     index: u32,
-
-    /// Reference to the Global represented by this symbol
-    global: *types.Global,
 };
 
 pub const Function = struct {

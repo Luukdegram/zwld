@@ -44,7 +44,7 @@ pub fn emit(wasm: *Wasm) !void {
         }
 
         for (wasm.imports.symbols()) |sym_with_loc| {
-            try emitImportSymbol(wasm, sym_with_loc.file, sym_with_loc.sym_index, writer);
+            try emitImportSymbol(wasm, sym_with_loc.file.?, sym_with_loc.sym_index, writer);
         }
 
         // TODO: Also emit GOT symbols
@@ -229,9 +229,14 @@ fn emitImportSymbol(wasm: *const Wasm, object_index: u16, symbol_index: u32, wri
     switch (symbol.kind) {
         .function => |func| {
             const value = wasm.imports.imported_functions.values()[func.index];
+            std.debug.assert(value.index == func.index);
             import.kind = .{ .function = value.type };
         },
-        .global => |global| import.kind = .{ .global = global.global.* },
+        .global => |global| {
+            const value = wasm.imports.imported_globals.values()[global.index];
+            std.debug.assert(value.index == global.index);
+            import.kind = .{ .global = value.global };
+        },
         .table => |table| import.kind = .{ .table = table.table.* },
         else => unreachable,
     }
@@ -279,13 +284,13 @@ fn emitMemory(mem: types.Memory, writer: anytype) !void {
     try emitLimits(mem.limits, writer);
 }
 
-fn emitGlobal(global: types.Global, writer: anytype) !void {
-    try leb.writeULEB128(writer, @enumToInt(global.valtype));
-    try leb.writeULEB128(writer, @boolToInt(global.mutable));
-    if (global.init) |init| try emitInitExpression(init, writer);
+fn emitGlobal(global: std.wasm.Global, writer: anytype) !void {
+    try leb.writeULEB128(writer, @enumToInt(global.global_type.valtype));
+    try leb.writeULEB128(writer, @boolToInt(global.global_type.mutable));
+    try emitInitExpression(global.init, writer);
 }
 
-fn emitInitExpression(init: types.InitExpression, writer: anytype) !void {
+fn emitInitExpression(init: std.wasm.InitExpression, writer: anytype) !void {
     switch (init) {
         .i32_const => |val| {
             try leb.writeULEB128(writer, std.wasm.opcode(.i32_const));
@@ -295,6 +300,7 @@ fn emitInitExpression(init: types.InitExpression, writer: anytype) !void {
             try leb.writeULEB128(writer, std.wasm.opcode(.global_get));
             try leb.writeULEB128(writer, index);
         },
+        else => @panic("TODO: Other init expression emission"),
     }
     try leb.writeULEB128(writer, std.wasm.opcode(.end));
 }
@@ -323,7 +329,7 @@ fn emitElement(wasm: *const Wasm, writer: anytype) !void {
 
     try leb.writeULEB128(writer, wasm.elements.functionCount());
     for (wasm.elements.indirect_functions.keys()) |sym_with_loc| {
-        const symbol = wasm.objects.items[sym_with_loc.file].symtable[sym_with_loc.sym_index];
+        const symbol = wasm.objects.items[sym_with_loc.file.?].symtable[sym_with_loc.sym_index];
         try leb.writeULEB128(writer, symbol.index().?);
     }
 }
