@@ -137,17 +137,17 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
     const symbol_loc = wasm_bin.symbol_resolver.get(symbol.name).?;
     const actual_symbol = symbol_loc.getSymbol(wasm_bin);
     return switch (relocation.relocation_type) {
-        .R_WASM_FUNCTION_INDEX_LEB => actual_symbol.index().?,
-        .R_WASM_TABLE_NUMBER_LEB => actual_symbol.index().?,
+        .R_WASM_FUNCTION_INDEX_LEB => actual_symbol.index,
+        .R_WASM_TABLE_NUMBER_LEB => actual_symbol.index,
         .R_WASM_TABLE_INDEX_I32,
         .R_WASM_TABLE_INDEX_I64,
         .R_WASM_TABLE_INDEX_SLEB,
         .R_WASM_TABLE_INDEX_SLEB64,
         => wasm_bin.elements.indirect_functions.get(symbol_loc) orelse 0,
-        .R_WASM_TYPE_INDEX_LEB => wasm_bin.functions.items.items[symbol.index().?].type_index,
+        .R_WASM_TYPE_INDEX_LEB => wasm_bin.functions.items.items[symbol.index].type_index,
         .R_WASM_GLOBAL_INDEX_I32,
         .R_WASM_GLOBAL_INDEX_LEB,
-        => actual_symbol.index().?,
+        => actual_symbol.index,
         .R_WASM_MEMORY_ADDR_I32,
         .R_WASM_MEMORY_ADDR_I64,
         .R_WASM_MEMORY_ADDR_LEB,
@@ -155,10 +155,10 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
         .R_WASM_MEMORY_ADDR_SLEB,
         .R_WASM_MEMORY_ADDR_SLEB64,
         => blk: {
-            if (symbol.isUndefined() and (symbol.kind == .data or symbol.isWeak())) {
+            if (symbol.isUndefined() and (symbol.tag == .data or symbol.isWeak())) {
                 return 0;
             }
-            const segment_name = object.segment_info[symbol.index().?].outputName();
+            const segment_name = object.segment_info[symbol.index].outputName();
             const atom_index = wasm_bin.data_segments.get(segment_name).?;
             var target_atom = wasm_bin.atoms.getPtr(atom_index).?.*.getFirst();
             while (true) {
@@ -172,7 +172,7 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
             const offset = target_atom.offset + segment.offset;
             break :blk offset + base + (relocation.addend orelse 0);
         },
-        .R_WASM_EVENT_INDEX_LEB => symbol.kind.event.index,
+        .R_WASM_EVENT_INDEX_LEB => symbol.index,
         .R_WASM_SECTION_OFFSET_I32,
         .R_WASM_FUNCTION_OFFSET_I32,
         => relocation.offset,

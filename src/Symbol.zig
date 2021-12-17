@@ -10,42 +10,33 @@ const types = @import("types.zig");
 flags: u32,
 /// Symbol name, when undefined this will be taken from the import.
 name: []const u8,
-/// An union that represents both the type of symbol
-/// as well as the data it holds.
-kind: Kind,
+/// Represents what type of symbol this represents.
+tag: Tag,
+/// This is `undefined` when the `tag` is `Data` and the symbol is undefined.
+/// Therefore accessing the index field in such cases is illegal behavior.
+index: u32,
 
-/// A union of possible symbol types, providing
-/// access to type-dependent information.
-pub const Kind = union(Tag) {
-    function: Function,
-    data: Data,
-    global: Global,
-    section: u32,
-    event: Event,
-    table: Table,
-
-    pub const Tag = enum {
-        function,
-        data,
-        global,
-        section,
-        event,
-        table,
-
-        /// From a given symbol kind, returns the `ExternalType`
-        /// Asserts the given tag can be represented as an external type.
-        pub fn externalType(self: Tag) std.wasm.ExternalKind {
-            return switch (self) {
-                .function => .function,
-                .global => .global,
-                .data => .memory,
-                .section => unreachable, // Not an external type
-                .event => unreachable, // Not an external type
-                .table => .table,
-            };
-        }
-    };
+pub const Tag = enum {
+    function,
+    data,
+    global,
+    section,
+    event,
+    table,
 };
+
+/// From a given symbol kind, returns the `ExternalType`
+/// Asserts the given tag can be represented as an external type.
+pub fn externalType(self: Symbol) std.wasm.ExternalKind {
+    return switch (self.tag) {
+        .function => .function,
+        .global => .global,
+        .data => .memory,
+        .section => unreachable, // Not an external type
+        .event => unreachable, // Not an external type
+        .table => .table,
+    };
+}
 
 pub const Flag = enum(u32) {
     /// Indicates a weak symbol.
@@ -76,71 +67,16 @@ pub const Flag = enum(u32) {
     WASM_SYM_TLS = 0x100,
 };
 
-/// Attempts to unwrap a symbol based on a given expected `Kind`.
-/// When the kind is not the active tag of the symbol, this returns null.
-pub fn unwrapAs(self: Symbol, comptime kind: Kind.Tag) ?std.meta.TagPayload(Kind, kind) {
-    if (std.meta.activeTag(self.kind) != kind) return null;
-
-    return @field(self.kind, @tagName(kind));
-}
-
-/// Returns the index the symbol points to.
-/// In case of a data symbol, this can result into `null`.
-pub fn index(self: Symbol) ?u32 {
-    return switch (self.kind) {
-        .function => |func| func.index,
-        .data => |data| data.index,
-        .global => |global| global.index,
-        .section => |section| section,
-        .event => |event| event.index,
-        .table => |table| table.index,
-    };
-}
-
-/// Sets the index of a symbol.
-pub fn setIndex(self: *Symbol, idx: u32) void {
-    return switch (self.kind) {
-        .function => |*func| func.index = idx,
-        .data => |*data| data.index = idx,
-        .global => |*global| global.index = idx,
-        .section => |*section| section.* = idx,
-        .event => |*event| event.index = idx,
-        .table => |*table| table.index = idx,
-    };
-}
-
 /// Verifies if the given symbol should be imported from the
 /// host environment or not
 pub fn requiresImport(self: Symbol) bool {
     if (!self.isUndefined()) return false;
     if (self.isWeak()) return false;
-    if (self.kind == .data) return false;
+    if (self.tag == .data) return false;
     // if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
 
     return true;
 }
-
-pub const Data = struct {
-    index: ?u32 = null,
-    offset: ?u32 = null,
-    size: ?u32 = null,
-};
-
-pub const Global = struct {
-    index: u32,
-};
-
-pub const Function = struct {
-    index: u32,
-};
-
-pub const Event = struct {
-    index: u32,
-};
-
-pub const Table = struct {
-    index: u32,
-};
 
 pub fn hasFlag(self: Symbol, flag: Flag) bool {
     return self.flags & @enumToInt(flag) != 0;
