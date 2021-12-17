@@ -35,7 +35,7 @@ pub fn emit(wasm: *Wasm) !void {
         const offset = try reserveSectionHeader(file);
 
         if (wasm.options.import_memory) {
-            const mem_import: types.Import = .{
+            const mem_import: std.wasm.Import = .{
                 .module_name = "env",
                 .name = "memory",
                 .kind = .{ .memory = wasm.memories.limits },
@@ -220,7 +220,7 @@ fn emitType(type_entry: types.FuncType, writer: anytype) !void {
 fn emitImportSymbol(wasm: *const Wasm, object_index: u16, symbol_index: u32, writer: anytype) !void {
     const object = wasm.objects.items[object_index];
     const symbol = object.symtable[symbol_index];
-    var import: types.Import = .{
+    var import: std.wasm.Import = .{
         .module_name = object.imports[symbol.index().?].module_name,
         .name = symbol.name,
         .kind = undefined,
@@ -237,14 +237,18 @@ fn emitImportSymbol(wasm: *const Wasm, object_index: u16, symbol_index: u32, wri
             std.debug.assert(value.index == global.index);
             import.kind = .{ .global = value.global };
         },
-        .table => |table| import.kind = .{ .table = table.table.* },
+        .table => |table| {
+            const value = wasm.imports.imported_tables.values()[table.index];
+            std.debug.assert(value.index == table.index);
+            import.kind = .{ .table = value.table };
+        },
         else => unreachable,
     }
 
     try emitImport(import, writer);
 }
 
-fn emitImport(import_entry: types.Import, writer: anytype) !void {
+fn emitImport(import_entry: std.wasm.Import, writer: anytype) !void {
     try leb.writeULEB128(writer, @intCast(u32, import_entry.module_name.len));
     try writer.writeAll(import_entry.module_name);
 
@@ -267,12 +271,12 @@ fn emitFunction(func: std.wasm.Func, writer: anytype) !void {
     try leb.writeULEB128(writer, func.type_index);
 }
 
-fn emitTable(table: types.Table, writer: anytype) !void {
+fn emitTable(table: std.wasm.Table, writer: anytype) !void {
     try leb.writeULEB128(writer, @enumToInt(table.reftype));
     try emitLimits(table.limits, writer);
 }
 
-fn emitLimits(limits: types.Limits, writer: anytype) !void {
+fn emitLimits(limits: std.wasm.Limits, writer: anytype) !void {
     try leb.writeULEB128(writer, @boolToInt(limits.max != null));
     try leb.writeULEB128(writer, limits.min);
     if (limits.max) |max| {

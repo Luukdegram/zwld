@@ -45,7 +45,7 @@ tables: sections.Tables = .{},
 /// Output memory section, this will only be used when `options.import_memory`
 /// is set to false. The limits will be set, based on the total data section size
 /// and other configuration options.
-memories: types.Memory = .{ .limits = .{ .min = 0, .max = null } },
+memories: std.wasm.Memory = .{ .limits = .{ .min = 0, .max = null } },
 /// Output global section
 globals: sections.Globals = .{},
 /// Output export section
@@ -268,6 +268,15 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
 
 /// Calculates the new indexes for symbols and their respective symbols
 fn mergeSections(self: *Wasm, gpa: Allocator) !void {
+    // first append the indirect function table if initialized
+    if (self.symbol_resolver.get(Symbol.linker_defined.names.indirect_function_table)) |sym_with_loc| {
+        log.debug("Appending indirect function table", .{});
+        const object: Object = self.objects.items[sym_with_loc.file.?];
+        const symbol = sym_with_loc.getSymbol(self);
+        const imp = object.findImport(.table, object.symtable[sym_with_loc.sym_index].index().?);
+        symbol.setIndex(try self.tables.append(gpa, self.imports.tableCount(), imp.kind.table));
+    }
+
     log.debug("Merging sections", .{});
     for (self.symbol_resolver.values()) |sym_with_loc| {
         const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
@@ -292,25 +301,21 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
                     original_global,
                 );
             },
+            .table => |*table| {
+                const offset = object.importedCountByKind(.table);
+                const original_table = object.tables[table.index - offset];
+                table.index = try self.tables.append(
+                    gpa,
+                    self.imports.tableCount(),
+                    original_table,
+                );
+            },
             else => {},
         }
     }
     log.debug("Merged ({d}) functions", .{self.functions.count()});
     log.debug("Merged ({d}) globals", .{self.globals.count()});
-
-    // merge tables
-    {
-        // first append the indirect function table if initialized
-        if (Symbol.linker_defined.indirect_function_table) |table| {
-            log.debug("Appending indirect function table", .{});
-            try self.tables.append(gpa, self.imports.tableCount(), table.kind.table.table);
-        }
-        for (self.objects.items) |object| {
-            for (object.tables) |*table| {
-                try self.tables.append(gpa, self.imports.tableCount(), table);
-            }
-        }
-    }
+    log.debug("Merged ({d}) tables", .{self.tables.count()});
 }
 
 fn mergeTypes(self: *Wasm, gpa: Allocator) !void {

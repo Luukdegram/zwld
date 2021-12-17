@@ -79,8 +79,8 @@ pub const Import = struct {
 
     pub const Kind = union(wasm.ExternalKind) {
         function: u32,
-        table: Table,
-        memory: Limits,
+        table: std.wasm.Table,
+        memory: std.wasm.Limits,
         global: std.wasm.GlobalType,
     };
 };

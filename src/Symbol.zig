@@ -140,9 +140,6 @@ pub const Event = struct {
 
 pub const Table = struct {
     index: u32,
-
-    /// Reference to a table that is represented by this symbol
-    table: *types.Table,
 };
 
 pub fn hasFlag(self: Symbol, flag: Flag) bool {
