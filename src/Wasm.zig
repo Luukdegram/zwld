@@ -218,14 +218,14 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
             return error.UndefinedLocal;
         }
 
-        if (symbol.kind == .table and
+        if (symbol.tag == .table and
             std.mem.eql(u8, symbol.name, Symbol.linker_defined.names.indirect_function_table) and
             Symbol.linker_defined.indirect_function_table == null)
         {
             Symbol.linker_defined.indirect_function_table = symbol;
         }
 
-        if (symbol.kind == .table) continue;
+        if (symbol.tag == .table) continue;
 
         // @TODO: locals are allowed to have duplicate symbol names
         // @TODO: Store undefined symbols so we can verify at the end if they've all been found
@@ -273,8 +273,8 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
         log.debug("Appending indirect function table", .{});
         const object: Object = self.objects.items[sym_with_loc.file.?];
         const symbol = sym_with_loc.getSymbol(self);
-        const imp = object.findImport(.table, object.symtable[sym_with_loc.sym_index].index().?);
-        symbol.setIndex(try self.tables.append(gpa, self.imports.tableCount(), imp.kind.table));
+        const imp = object.findImport(.table, object.symtable[sym_with_loc.sym_index].index);
+        symbol.index = try self.tables.append(gpa, self.imports.tableCount(), imp.kind.table);
     }
 
     log.debug("Merging sections", .{});
@@ -282,29 +282,29 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
         const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
         if (symbol.isUndefined()) continue; // skip imports
-        switch (symbol.kind) {
-            .function => |*func| {
+        switch (symbol.tag) {
+            .function => {
                 const offset = object.importedCountByKind(.function);
-                const original_func = object.functions[func.index - offset];
-                func.index = try self.functions.append(
+                const original_func = object.functions[symbol.index - offset];
+                symbol.index = try self.functions.append(
                     gpa,
                     self.imports.functionCount(),
                     original_func,
                 );
             },
-            .global => |*global| {
+            .global => {
                 const offset = object.importedCountByKind(.global);
-                const original_global = object.globals[global.index - offset];
-                global.index = try self.globals.append(
+                const original_global = object.globals[symbol.index - offset];
+                symbol.index = try self.globals.append(
                     gpa,
                     self.imports.globalCount(),
                     original_global,
                 );
             },
-            .table => |*table| {
+            .table => {
                 const offset = object.importedCountByKind(.table);
-                const original_table = object.tables[table.index - offset];
-                table.index = try self.tables.append(
+                const original_table = object.tables[symbol.index - offset];
+                symbol.index = try self.tables.append(
                     gpa,
                     self.imports.tableCount(),
                     original_table,
@@ -323,15 +323,15 @@ fn mergeTypes(self: *Wasm, gpa: Allocator) !void {
     for (self.symbol_resolver.values()) |sym_with_loc| {
         const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
-        if (symbol.unwrapAs(.function)) |func_symbol| {
+        if (symbol.tag == .function) {
             if (symbol.isUndefined()) {
                 log.debug("Adding type from extern function '{s}'", .{symbol.name});
-                const value = &self.imports.imported_functions.values()[func_symbol.index];
+                const value = &self.imports.imported_functions.values()[symbol.index];
                 value.type = try self.types.append(gpa, object.types[value.type]);
                 continue;
             }
             log.debug("Adding type from function '{s}'", .{symbol.name});
-            const func = &self.functions.items.items[func_symbol.index - self.imports.functionCount()];
+            const func = &self.functions.items.items[symbol.index - self.imports.functionCount()];
             func.type_index = try self.types.append(gpa, object.types[func.type_index]);
         }
     }
@@ -354,18 +354,18 @@ fn setupExports(self: *Wasm, gpa: Allocator) !void {
 
         var name: []const u8 = symbol.name;
         var exported: types.Export = undefined;
-        if (symbol.unwrapAs(.function)) |func| {
-            exported = .{ .name = name, .kind = .function, .index = func.index };
+        if (symbol.tag == .function) {
+            exported = .{ .name = name, .kind = .function, .index = symbol.index };
         } else {
             log.warn("TODO: Export non-functions type({s}) name={s}", .{
-                @tagName(std.meta.activeTag(symbol.kind)),
+                @tagName(symbol.tag),
                 name,
             });
             continue;
         }
 
         log.debug("Appending export from symbol '{s}' using name: '{s}' index: {d}", .{
-            symbol.name, name, symbol.index().?,
+            symbol.name, name, symbol.index,
         });
         try self.exports.append(gpa, exported);
         try self.exports.appendSymbol(gpa, entry.symbol);
@@ -378,9 +378,8 @@ fn setupLinkerSymbols(self: *Wasm, gpa: Allocator) !void {
     var symbol: Symbol = .{
         .flags = 0,
         .name = "__stack_pointer",
-        .kind = .{ .global = .{
-            .index = 0,
-        } },
+        .tag = .global,
+        .index = 0,
     };
 
     const global: std.wasm.Global = .{
@@ -388,8 +387,7 @@ fn setupLinkerSymbols(self: *Wasm, gpa: Allocator) !void {
         .global_type = .{ .valtype = .i32, .mutable = true },
     };
 
-    const target_index = try self.globals.append(gpa, 0, global);
-    symbol.setIndex(target_index);
+    symbol.index = try self.globals.append(gpa, 0, global);
 
     const sym_index = @intCast(u32, self.synthetic_symbols.count());
     const loc: SymbolWithLoc = .{ .sym_index = sym_index, .file = null };
@@ -442,7 +440,7 @@ fn mergeImports(self: *Wasm, gpa: Allocator) !void {
 
     for (self.symbol_resolver.values()) |sym_with_loc| {
         const symbol = sym_with_loc.getSymbol(self);
-        if (symbol.kind != .data) {
+        if (symbol.tag != .data) {
             if (!symbol.requiresImport()) {
                 continue;
             }
@@ -523,7 +521,7 @@ fn setupMemory(self: *Wasm) !void {
 
     // set stack value on global
     if (self.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
-        const global: *std.wasm.Global = &self.globals.items.items[stack_pointer.index().?];
+        const global: *std.wasm.Global = &self.globals.items.items[stack_pointer.index];
         global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
     }
 }
@@ -583,11 +581,6 @@ fn allocateAtoms(self: *Wasm) !void {
 
             const object: *Object = &self.objects.items[atom.file];
             const symbol = &object.symtable[atom.sym_index];
-            // symbol.setIndex(segment_index);
-            if (symbol.unwrapAs(.data)) |*data| {
-                data.offset = offset;
-                data.size = atom.size;
-            }
 
             log.debug("Atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8} size={d}", .{
                 symbol.name,
@@ -628,7 +621,7 @@ fn setupStart(self: *Wasm) !void {
         return error.MissingSymbol;
     };
     const symbol = symbol_with_loc.getSymbol(self);
-    if (symbol.kind != .function) {
+    if (symbol.tag != .function) {
         log.err("Entry symbol '{s}' is not a function", .{entry_name});
         return error.InvalidEntryKind;
     }

@@ -92,7 +92,7 @@ const RelocatableData = struct {
     }
 
     /// Returns the symbol kind that corresponds to the relocatable section
-    pub fn getSymbolKind(self: RelocatableData) Symbol.Kind.Tag {
+    pub fn getSymbolKind(self: RelocatableData) Symbol.Tag {
         return switch (self.type) {
             .data => .data,
             .code => .function,
@@ -164,7 +164,7 @@ pub fn getTable(self: *const Object, id: u32) *types.Table {
 fn checkLegacyIndirectFunctionTable(self: *Object) !?Symbol {
     var table_count: usize = 0;
     for (self.symtable) |sym| {
-        if (sym.kind == .table) table_count += 1;
+        if (sym.tag == .table) table_count += 1;
     }
 
     const import_table_count = self.importedCountByKind(.table);
@@ -205,11 +205,8 @@ fn checkLegacyIndirectFunctionTable(self: *Object) !?Symbol {
     var table_symbol: Symbol = .{
         .flags = 0,
         .name = table_import.name,
-        .kind = .{
-            .table = .{
-                .index = 0,
-            },
-        },
+        .tag = .table,
+        .index = 0,
     };
     table_symbol.setFlag(.WASM_SYM_UNDEFINED);
     table_symbol.setFlag(.WASM_SYM_NO_STRIP);
@@ -631,7 +628,7 @@ fn Parser(comptime ReaderType: type) type {
                         const symbol = symbols.addOneAssumeCapacity();
                         symbol.* = try self.parseSymbol(gpa, reader);
                         log.debug("Found symbol: type({s}) name({s}) flags(0b{b:0>8})", .{
-                            @tagName(symbol.kind),
+                            @tagName(symbol.tag),
                             symbol.name,
                             symbol.flags,
                         });
@@ -653,40 +650,41 @@ fn Parser(comptime ReaderType: type) type {
         /// requires access to `Object` to find the name of a symbol when it's
         /// an import and flag `WASM_SYM_EXPLICIT_NAME` is not set.
         fn parseSymbol(self: *Self, gpa: Allocator, reader: anytype) !Symbol {
-            const kind = @intToEnum(Symbol.Kind.Tag, try leb.readULEB128(u8, reader));
+            const tag = @intToEnum(Symbol.Tag, try leb.readULEB128(u8, reader));
             const flags = try leb.readULEB128(u32, reader);
             var symbol: Symbol = .{
                 .flags = flags,
-                .kind = undefined,
+                .tag = tag,
                 .name = undefined,
+                .index = undefined,
             };
 
-            switch (kind) {
+            switch (tag) {
                 .data => {
                     const name_len = try leb.readULEB128(u32, reader);
                     const name = try gpa.alloc(u8, name_len);
                     try reader.readNoEof(name);
                     symbol.name = name;
-                    symbol.kind = .{ .data = .{} };
 
                     // Data symbols only have the following fields if the symbol is defined
                     if (symbol.isDefined()) {
-                        symbol.kind.data.index = try leb.readULEB128(u32, reader);
-                        symbol.kind.data.offset = try leb.readULEB128(u32, reader);
-                        symbol.kind.data.size = try leb.readULEB128(u32, reader);
+                        symbol.index = try leb.readULEB128(u32, reader);
+                        // @TODO: We should verify those values
+                        _ = try leb.readULEB128(u32, reader);
+                        _ = try leb.readULEB128(u32, reader);
                     }
                 },
                 .section => {
-                    symbol.kind = .{ .section = try leb.readULEB128(u32, reader) };
-                    symbol.name = @tagName(symbol.kind);
+                    symbol.index = try leb.readULEB128(u32, reader);
+                    symbol.name = @tagName(symbol.tag);
                 },
-                else => |tag| {
-                    const index = try leb.readULEB128(u32, reader);
+                else => {
+                    symbol.index = try leb.readULEB128(u32, reader);
                     var maybe_import: ?*types.Import = null;
 
                     const is_undefined = symbol.isUndefined();
                     if (is_undefined) {
-                        maybe_import = self.object.findImport(kind.externalType(), index);
+                        maybe_import = self.object.findImport(symbol.externalType(), symbol.index);
                     }
                     const explicit_name = symbol.hasFlag(.WASM_SYM_EXPLICIT_NAME);
                     if (!(is_undefined and !explicit_name)) {
@@ -697,14 +695,6 @@ fn Parser(comptime ReaderType: type) type {
                     } else {
                         symbol.name = maybe_import.?.name;
                     }
-
-                    symbol.kind = switch (tag) {
-                        .function => .{ .function = .{ .index = index } },
-                        .global => .{ .global = .{ .index = index } },
-                        .table => .{ .table = .{ .index = index } },
-                        .event => .{ .event = .{ .index = index } },
-                        else => unreachable,
-                    };
                 },
             }
             return symbol;
@@ -777,17 +767,17 @@ fn assertEnd(reader: anytype) !void {
 pub fn parseIntoAtoms(self: *Object, gpa: Allocator, object_index: u16, wasm_bin: *Wasm) !void {
     log.debug("Parsing data section into atoms", .{});
     const Key = struct {
-        kind: Symbol.Kind.Tag,
+        kind: Symbol.Tag,
         index: u32,
     };
     var symbol_for_segment = std.AutoArrayHashMap(Key, u32).init(gpa);
     defer symbol_for_segment.deinit();
 
     for (self.symtable) |symbol, symbol_index| {
-        switch (symbol.kind) {
+        switch (symbol.tag) {
             .function, .data => if (!symbol.isUndefined()) {
                 try symbol_for_segment.putNoClobber(
-                    .{ .kind = symbol.kind, .index = symbol.index().? },
+                    .{ .kind = symbol.tag, .index = symbol.index },
                     @intCast(u32, symbol_index),
                 );
             },

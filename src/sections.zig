@@ -53,7 +53,7 @@ pub const Imports = struct {
         ImportKey,
         struct { index: u32, type: u32 },
         ImportKey.Ctx,
-        false,
+        true,
     ) = .{},
     /// Table where the key is represented by an import.
     /// Each entry represents an imported global from the host environment and maps to the index
@@ -62,7 +62,7 @@ pub const Imports = struct {
         ImportKey,
         struct { index: u32, global: std.wasm.GlobalType },
         ImportKey.Ctx,
-        false,
+        true,
     ) = .{},
     /// Table where the key is represented by an import.
     /// Each entry represents an imported table from the host environment and maps to the index
@@ -71,7 +71,7 @@ pub const Imports = struct {
         ImportKey,
         struct { index: u32, table: std.wasm.Table },
         ImportKey.Ctx,
-        false,
+        true,
     ) = .{},
     /// A list of symbols representing objects that have been imported.
     imported_symbols: std.ArrayListUnmanaged(Wasm.SymbolWithLoc) = .{},
@@ -114,12 +114,12 @@ pub const Imports = struct {
     ) !void {
         const object: *Object = &wasm.objects.items[sym_with_loc.file.?];
         const symbol = &object.symtable[sym_with_loc.sym_index];
-        const import = object.findImport(Symbol.Kind.Tag.externalType(symbol.kind), symbol.index().?);
+        const import = object.findImport(symbol.externalType(), symbol.index);
         const module_name = import.module_name;
         const import_name = symbol.name;
 
-        switch (symbol.kind) {
-            .function => |*func| {
+        switch (symbol.tag) {
+            .function => {
                 const ret = try self.imported_functions.getOrPut(gpa, .{
                     .module_name = module_name,
                     .name = import_name,
@@ -131,10 +131,10 @@ pub const Imports = struct {
                         .type = import.kind.function,
                     };
                 }
-                symbol.setIndex(ret.value_ptr.*.index);
-                log.debug("Imported function '{s}' at index ({d})", .{ import_name, func.index });
+                symbol.index = ret.value_ptr.*.index;
+                log.debug("Imported function '{s}' at index ({d})", .{ import_name, symbol.index });
             },
-            .global => |*global| {
+            .global => {
                 const ret = try self.imported_globals.getOrPut(gpa, .{
                     .module_name = module_name,
                     .name = import_name,
@@ -146,10 +146,10 @@ pub const Imports = struct {
                         .global = import.kind.global,
                     };
                 }
-                symbol.setIndex(ret.value_ptr.*.index);
-                log.debug("Imported global '{s}' at index ({d})", .{ import_name, global.index });
+                symbol.index = ret.value_ptr.*.index;
+                log.debug("Imported global '{s}' at index ({d})", .{ import_name, symbol.index });
             },
-            .table => |*table| {
+            .table => {
                 const ret = try self.imported_tables.getOrPut(gpa, .{
                     .module_name = module_name,
                     .name = import_name,
@@ -161,8 +161,8 @@ pub const Imports = struct {
                         .table = import.kind.table,
                     };
                 }
-                symbol.setIndex(ret.value_ptr.*.index);
-                log.debug("Imported table '{s}' at index ({d})", .{ import_name, table.index });
+                symbol.index = ret.value_ptr.*.index;
+                log.debug("Imported table '{s}' at index ({d})", .{ import_name, symbol.index });
             },
             else => unreachable, // programmer error: Given symbol cannot be imported
         }

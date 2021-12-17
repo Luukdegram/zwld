@@ -221,25 +221,25 @@ fn emitImportSymbol(wasm: *const Wasm, object_index: u16, symbol_index: u32, wri
     const object = wasm.objects.items[object_index];
     const symbol = object.symtable[symbol_index];
     var import: std.wasm.Import = .{
-        .module_name = object.imports[symbol.index().?].module_name,
+        .module_name = object.imports[symbol.index].module_name,
         .name = symbol.name,
         .kind = undefined,
     };
 
-    switch (symbol.kind) {
-        .function => |func| {
-            const value = wasm.imports.imported_functions.values()[func.index];
-            std.debug.assert(value.index == func.index);
+    switch (symbol.tag) {
+        .function => {
+            const value = wasm.imports.imported_functions.values()[symbol.index];
+            std.debug.assert(value.index == symbol.index);
             import.kind = .{ .function = value.type };
         },
-        .global => |global| {
-            const value = wasm.imports.imported_globals.values()[global.index];
-            std.debug.assert(value.index == global.index);
+        .global => {
+            const value = wasm.imports.imported_globals.values()[symbol.index];
+            std.debug.assert(value.index == symbol.index);
             import.kind = .{ .global = value.global };
         },
-        .table => |table| {
-            const value = wasm.imports.imported_tables.values()[table.index];
-            std.debug.assert(value.index == table.index);
+        .table => {
+            const value = wasm.imports.imported_tables.values()[symbol.index];
+            std.debug.assert(value.index == symbol.index);
             import.kind = .{ .table = value.table };
         },
         else => unreachable,
@@ -320,7 +320,7 @@ fn emitElement(wasm: *const Wasm, writer: anytype) !void {
     var flags: u32 = 0;
     var index: ?u32 = if (Symbol.linker_defined.indirect_function_table) |symbol| blk: {
         flags |= 0x2;
-        break :blk symbol.kind.table.index;
+        break :blk symbol.index;
     } else null;
     try leb.writeULEB128(writer, flags);
     if (index) |idx|
@@ -334,6 +334,6 @@ fn emitElement(wasm: *const Wasm, writer: anytype) !void {
     try leb.writeULEB128(writer, wasm.elements.functionCount());
     for (wasm.elements.indirect_functions.keys()) |sym_with_loc| {
         const symbol = wasm.objects.items[sym_with_loc.file.?].symtable[sym_with_loc.sym_index];
-        try leb.writeULEB128(writer, symbol.index().?);
+        try leb.writeULEB128(writer, symbol.index);
     }
 }
