@@ -181,12 +181,7 @@ fn reserveSectionHeader(file: fs.File) !u64 {
 /// Emits the actual section header at the given `offset`.
 /// Will write the section id, the section byte length, as well as the section entry count.
 /// The amount of bytes is calculated using the current position, minus the offset (and reserved header bytes).
-fn emitSectionHeader(
-    file: fs.File,
-    offset: u64,
-    section_type: types.SectionType,
-    entries: usize,
-) !void {
+fn emitSectionHeader(file: fs.File, offset: u64, section_type: std.wasm.Section, entries: usize) !void {
     // section id, section byte size, section entry count
     var buf: [1 + 5 + 5]u8 = undefined;
     buf[0] = @enumToInt(section_type);
@@ -204,7 +199,7 @@ fn emitSectionHeader(
     });
 }
 
-fn emitType(type_entry: types.FuncType, writer: anytype) !void {
+fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
     log.debug("Writing type {}", .{type_entry});
     try leb.writeULEB128(writer, @as(u8, 0x60)); //functype
     try leb.writeULEB128(writer, @intCast(u32, type_entry.params.len));
@@ -309,7 +304,7 @@ fn emitInitExpression(init: std.wasm.InitExpression, writer: anytype) !void {
     try leb.writeULEB128(writer, std.wasm.opcode(.end));
 }
 
-fn emitExport(exported: types.Export, writer: anytype) !void {
+fn emitExport(exported: std.wasm.Export, writer: anytype) !void {
     try leb.writeULEB128(writer, @intCast(u32, exported.name.len));
     try writer.writeAll(exported.name);
     try leb.writeULEB128(writer, @enumToInt(exported.kind));
@@ -318,9 +313,9 @@ fn emitExport(exported: types.Export, writer: anytype) !void {
 
 fn emitElement(wasm: *const Wasm, writer: anytype) !void {
     var flags: u32 = 0;
-    var index: ?u32 = if (Symbol.linker_defined.indirect_function_table) |symbol| blk: {
+    var index: ?u32 = if (wasm.symbol_resolver.get("__indirect_function_table")) |sym_loc| blk: {
         flags |= 0x2;
-        break :blk symbol.index;
+        break :blk sym_loc.getSymbol(wasm).index;
     } else null;
     try leb.writeULEB128(writer, flags);
     if (index) |idx|

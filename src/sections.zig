@@ -272,12 +272,12 @@ pub const Types = struct {
     /// this list, duplicates will be removed.
     ///
     /// TODO: Would a hashmap be more efficient?
-    items: std.ArrayListUnmanaged(types.FuncType) = .{},
+    items: std.ArrayListUnmanaged(std.wasm.Type) = .{},
 
     /// Checks if a given type is already present within the list of types.
     /// If not, the given type will be appended to the list.
     /// In all cases, this will return the index within the list of types.
-    pub fn append(self: *Types, gpa: Allocator, func_type: types.FuncType) !u32 {
+    pub fn append(self: *Types, gpa: Allocator, func_type: std.wasm.Type) !u32 {
         return self.find(func_type) orelse {
             const index = self.count();
             try self.items.append(gpa, func_type);
@@ -287,14 +287,14 @@ pub const Types = struct {
 
     /// Returns a pointer to the function type at given `index`
     /// Asserts the index is within bounds.
-    pub fn get(self: Types, index: u32) *types.FuncType {
+    pub fn get(self: Types, index: u32) *std.wasm.Type {
         return &self.items.items[index];
     }
 
     /// Checks if any type (read: function signature) already exists within
     /// the type section. When it does exist, it will return its index
     /// otherwise, returns `null`.
-    pub fn find(self: Types, func_type: types.FuncType) ?u32 {
+    pub fn find(self: Types, func_type: std.wasm.Type) ?u32 {
         return for (self.items.items) |ty, index| {
             if (std.mem.eql(std.wasm.Valtype, ty.params, func_type.params) and
                 std.mem.eql(std.wasm.Valtype, ty.returns, func_type.returns))
@@ -381,14 +381,14 @@ pub const Tables = struct {
 pub const Exports = struct {
     /// List of exports, containing both merged exports
     /// as linker-defined exports such as __stack_pointer.
-    items: std.ArrayListUnmanaged(types.Export) = .{},
+    items: std.ArrayListUnmanaged(std.wasm.Export) = .{},
 
     /// Contains a list of pointers to symbols
     /// TODO: Do we really need this list?
     symbols: std.ArrayListUnmanaged(*Symbol) = .{},
 
     /// Appends a given `wasm.Export` to the list of output exports.
-    pub fn append(self: *Exports, gpa: Allocator, exp: types.Export) !void {
+    pub fn append(self: *Exports, gpa: Allocator, exp: std.wasm.Export) !void {
         try self.items.append(gpa, exp);
     }
 

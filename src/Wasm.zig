@@ -218,12 +218,12 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
             return error.UndefinedLocal;
         }
 
-        if (symbol.tag == .table and
-            std.mem.eql(u8, symbol.name, Symbol.linker_defined.names.indirect_function_table) and
-            Symbol.linker_defined.indirect_function_table == null)
-        {
-            Symbol.linker_defined.indirect_function_table = symbol;
-        }
+        // if (symbol.tag == .table and
+        //     std.mem.eql(u8, symbol.name, "__indirect_function_table") and
+        //     Symbol.linker_defined.indirect_function_table == null)
+        // {
+        //     Symbol.linker_defined.indirect_function_table = symbol;
+        // }
 
         if (symbol.tag == .table) continue;
 
@@ -269,7 +269,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
 /// Calculates the new indexes for symbols and their respective symbols
 fn mergeSections(self: *Wasm, gpa: Allocator) !void {
     // first append the indirect function table if initialized
-    if (self.symbol_resolver.get(Symbol.linker_defined.names.indirect_function_table)) |sym_with_loc| {
+    if (self.symbol_resolver.get("__indirect_function_table")) |sym_with_loc| {
         log.debug("Appending indirect function table", .{});
         const object: Object = self.objects.items[sym_with_loc.file.?];
         const symbol = sym_with_loc.getSymbol(self);
@@ -353,7 +353,7 @@ fn setupExports(self: *Wasm, gpa: Allocator) !void {
         if (!symbol.isExported()) continue;
 
         var name: []const u8 = symbol.name;
-        var exported: types.Export = undefined;
+        var exported: std.wasm.Export = undefined;
         if (symbol.tag == .function) {
             exported = .{ .name = name, .kind = .function, .index = symbol.index };
         } else {
@@ -430,8 +430,9 @@ const SymbolIterator = struct {
 };
 
 fn mergeImports(self: *Wasm, gpa: Allocator) !void {
+    const maybe_func_table = self.symbol_resolver.get("__indirect_function_table");
     if (self.options.import_table) {
-        const sym_with_loc = self.symbol_resolver.get(Symbol.linker_defined.names.indirect_function_table) orelse {
+        const sym_with_loc = maybe_func_table orelse {
             log.err("Required import __indirect_function_table is missing from object files", .{});
             return error.MissingSymbol;
         };
@@ -444,8 +445,8 @@ fn mergeImports(self: *Wasm, gpa: Allocator) !void {
             if (!symbol.requiresImport()) {
                 continue;
             }
-            if (Symbol.linker_defined.indirect_function_table) |table| {
-                if (symbol == table) continue;
+            if (maybe_func_table) |table_loc| {
+                if (std.meta.eql(table_loc, sym_with_loc)) continue;
             }
             log.debug("Symbol '{s}' will be imported", .{symbol.name});
             try self.imports.appendSymbol(gpa, self, sym_with_loc);
