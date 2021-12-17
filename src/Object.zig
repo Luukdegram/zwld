@@ -26,9 +26,9 @@ file: ?std.fs.File = null,
 /// Name (read path) of the object file.
 name: []const u8,
 /// Parsed type section
-types: []const types.FuncType = &.{},
+types: []const std.wasm.Type = &.{},
 /// A list of all imports for this module
-imports: []types.Import = &.{},
+imports: []std.wasm.Import = &.{},
 /// Parsed function section
 functions: []std.wasm.Func = &.{},
 /// Parsed table section
@@ -38,7 +38,7 @@ memories: []const std.wasm.Memory = &.{},
 /// Parsed global section
 globals: []std.wasm.Global = &.{},
 /// Parsed export section
-exports: []const types.Export = &.{},
+exports: []const std.wasm.Export = &.{},
 /// Parsed element section
 elements: []const std.wasm.Element = &.{},
 /// Represents the function ID that must be called on startup.
@@ -130,7 +130,7 @@ pub fn deinit(self: *Object, gpa: Allocator) void {
 
 /// Finds the import within the list of imports from a given kind and index of that kind.
 /// Asserts the import exists
-pub fn findImport(self: *const Object, import_kind: std.wasm.ExternalKind, index: u32) *types.Import {
+pub fn findImport(self: *const Object, import_kind: std.wasm.ExternalKind, index: u32) *std.wasm.Import {
     var i: u32 = 0;
     return for (self.imports) |*import| {
         if (std.meta.activeTag(import.kind) == import_kind) {
@@ -149,7 +149,7 @@ pub fn importedCountByKind(self: *const Object, kind: std.wasm.ExternalKind) u32
 }
 
 /// Returns a table by a given id, rather than by its index within the list.
-pub fn getTable(self: *const Object, id: u32) *types.Table {
+pub fn getTable(self: *const Object, id: u32) *std.wasm.Table {
     return for (self.tables) |*table| {
         if (table.table_idx == id) break table;
     } else unreachable;
@@ -191,13 +191,13 @@ fn checkLegacyIndirectFunctionTable(self: *Object) !?Symbol {
         return error.MissingTableSymbols;
     }
 
-    var table_import: types.Import = for (self.imports) |imp| {
+    var table_import: std.wasm.Import = for (self.imports) |imp| {
         if (imp.kind == .table) {
             break imp;
         }
     } else unreachable;
 
-    if (!std.mem.eql(u8, table_import.name, Symbol.linker_defined.names.indirect_function_table)) {
+    if (!std.mem.eql(u8, table_import.name, "__indirect_function_table")) {
         log.err("Non-indirect function table import '{s}' is missing a corresponding symbol", .{table_import.name});
         return error.MissingTableSymbols;
     }
@@ -291,7 +291,7 @@ fn Parser(comptime ReaderType: type) type {
             while (self.reader.reader().readByte()) |byte| : (section_index += 1) {
                 const len = try readLeb(u32, self.reader.reader());
                 const reader = std.io.limitedReader(self.reader.reader(), len).reader();
-                switch (@intToEnum(types.SectionType, byte)) {
+                switch (@intToEnum(std.wasm.Section, byte)) {
                     .custom => {
                         const name_len = try readLeb(u32, reader);
                         const name = try gpa.alloc(u8, name_len);
@@ -334,7 +334,7 @@ fn Parser(comptime ReaderType: type) type {
                             try reader.readNoEof(name);
 
                             const kind = try readEnum(std.wasm.ExternalKind, reader);
-                            const kind_value: types.Import.Kind = switch (kind) {
+                            const kind_value: std.wasm.Import.Kind = switch (kind) {
                                 .function => .{ .function = try readLeb(u32, reader) },
                                 .memory => .{ .memory = try readLimits(reader) },
                                 .global => .{ .global = .{
@@ -680,7 +680,7 @@ fn Parser(comptime ReaderType: type) type {
                 },
                 else => {
                     symbol.index = try leb.readULEB128(u32, reader);
-                    var maybe_import: ?*types.Import = null;
+                    var maybe_import: ?*std.wasm.Import = null;
 
                     const is_undefined = symbol.isUndefined();
                     if (is_undefined) {

@@ -153,22 +153,3 @@ pub fn format(self: Symbol, comptime fmt: []const u8, options: std.fmt.FormatOpt
         .{ kind_fmt, binding, visible, self.index(), self.name },
     );
 }
-
-/// Namespace containing all symbols that are linker defined,
-/// rather than imported/defined by an object file.
-///
-/// By default all symbols are initialized by having their value set to `null`.
-/// They will be initialized by the linker depending on the definiton of the object files.
-pub const linker_defined = struct {
-    /// Represents a synthetic stack pointer,
-    /// used by wasm modules to emulate an explicit stack.
-    pub var stack_pointer: ?*Symbol = null;
-    /// Initialized when an object file notates the need for one.
-    pub var indirect_function_table: ?*Symbol = null;
-
-    /// Names of the linker defined symbols as known by the wasm tool convention
-    pub const names = struct {
-        pub const stack_pointer = "__stack_pointer";
-        pub const indirect_function_table = "__indirect_function_table";
-    };
-};
