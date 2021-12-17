@@ -67,7 +67,12 @@ pub const Imports = struct {
     /// Table where the key is represented by an import.
     /// Each entry represents an imported table from the host environment and maps to the index
     /// within this map.
-    imported_tables: std.ArrayHashMapUnmanaged(ImportKey, u32, ImportKey.Ctx, false) = .{},
+    imported_tables: std.ArrayHashMapUnmanaged(
+        ImportKey,
+        struct { index: u32, table: std.wasm.Table },
+        ImportKey.Ctx,
+        false,
+    ) = .{},
     /// A list of symbols representing objects that have been imported.
     imported_symbols: std.ArrayListUnmanaged(Wasm.SymbolWithLoc) = .{},
 
@@ -151,9 +156,12 @@ pub const Imports = struct {
                 });
                 if (!ret.found_existing) {
                     try self.imported_symbols.append(gpa, sym_with_loc);
-                    ret.value_ptr.* = @intCast(u32, self.imported_tables.count() - 1);
+                    ret.value_ptr.* = .{
+                        .index = self.tableCount() - 1,
+                        .table = import.kind.table,
+                    };
                 }
-                table.table.table_idx = ret.value_ptr.*;
+                symbol.setIndex(ret.value_ptr.*.index);
                 log.debug("Imported table '{s}' at index ({d})", .{ import_name, table.index });
             },
             else => unreachable, // programmer error: Given symbol cannot be imported
@@ -314,14 +322,14 @@ pub const Tables = struct {
     /// The list of tables that have been merged from all
     /// object files. This does not include any linker-defined
     /// tables. Once inserted in this list, the object becomes immutable.
-    items: std.ArrayListUnmanaged(types.Table) = .{},
+    items: std.ArrayListUnmanaged(std.wasm.Table) = .{},
 
     /// Appends a new table to the list of tables and sets its index to
     /// the position within the list of tables.
-    pub fn append(self: *Tables, gpa: Allocator, offset: u32, table: *types.Table) !void {
+    pub fn append(self: *Tables, gpa: Allocator, offset: u32, table: std.wasm.Table) !u32 {
         const index = offset + self.count();
-        table.table_idx = index;
-        try self.items.append(gpa, table.*);
+        try self.items.append(gpa, table);
+        return index;
     }
 
     /// Returns the amount of entries in the table section

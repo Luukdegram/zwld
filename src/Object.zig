@@ -32,9 +32,9 @@ imports: []types.Import = &.{},
 /// Parsed function section
 functions: []std.wasm.Func = &.{},
 /// Parsed table section
-tables: []types.Table = &.{},
+tables: []std.wasm.Table = &.{},
 /// Parsed memory section
-memories: []const types.Memory = &.{},
+memories: []const std.wasm.Memory = &.{},
 /// Parsed global section
 globals: []std.wasm.Global = &.{},
 /// Parsed export section
@@ -207,8 +207,7 @@ fn checkLegacyIndirectFunctionTable(self: *Object) !?Symbol {
         .name = table_import.name,
         .kind = .{
             .table = .{
-                .index = table_import.kind.table.table_idx,
-                .table = &self.imports[table_import.kind.table.table_idx].kind.table,
+                .index = 0,
             },
         },
     };
@@ -328,7 +327,7 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .import => {
-                        for (try readVec(&self.object.imports, reader, gpa)) |*import, index| {
+                        for (try readVec(&self.object.imports, reader, gpa)) |*import| {
                             const module_len = try readLeb(u32, reader);
                             const module_name = try gpa.alloc(u8, module_len);
                             try reader.readNoEof(module_name);
@@ -346,9 +345,8 @@ fn Parser(comptime ReaderType: type) type {
                                     .mutable = (try reader.readByte()) == 0x01,
                                 } },
                                 .table => .{ .table = .{
-                                    .reftype = try readEnum(types.RefType, reader),
+                                    .reftype = try readEnum(std.wasm.RefType, reader),
                                     .limits = try readLimits(reader),
-                                    .table_idx = @intCast(u32, index),
                                 } },
                             };
 
@@ -367,11 +365,10 @@ fn Parser(comptime ReaderType: type) type {
                         try assertEnd(reader);
                     },
                     .table => {
-                        for (try readVec(&self.object.tables, reader, gpa)) |*table, index| {
+                        for (try readVec(&self.object.tables, reader, gpa)) |*table| {
                             table.* = .{
-                                .reftype = try readEnum(types.RefType, reader),
+                                .reftype = try readEnum(std.wasm.RefType, reader),
                                 .limits = try readLimits(reader),
-                                .table_idx = @intCast(u32, index + self.object.importedCountByKind(.table)),
                             };
                         }
                         try assertEnd(reader);
@@ -704,13 +701,7 @@ fn Parser(comptime ReaderType: type) type {
                     symbol.kind = switch (tag) {
                         .function => .{ .function = .{ .index = index } },
                         .global => .{ .global = .{ .index = index } },
-                        .table => blk: {
-                            const table = if (is_undefined)
-                                &maybe_import.?.kind.table
-                            else
-                                self.object.getTable(index);
-                            break :blk .{ .table = .{ .index = index, .table = table } };
-                        },
+                        .table => .{ .table = .{ .index = index } },
                         .event => .{ .event = .{ .index = index } },
                         else => unreachable,
                     };
@@ -754,10 +745,10 @@ fn readEnum(comptime T: type, reader: anytype) !T {
     }
 }
 
-fn readLimits(reader: anytype) !types.Limits {
+fn readLimits(reader: anytype) !std.wasm.Limits {
     const flags = try readLeb(u1, reader);
     const min = try readLeb(u32, reader);
-    return types.Limits{
+    return std.wasm.Limits{
         .min = min,
         .max = if (flags == 0) null else try readLeb(u32, reader),
     };
