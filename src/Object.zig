@@ -808,6 +808,13 @@ pub fn parseIntoAtoms(self: *Object, gpa: Allocator, object_index: u16, wasm_bin
                 // rather than within the entire section.
                 relocation.offset -= relocatable_data.offset;
                 try atom.relocs.append(gpa, relocation.*);
+
+                if (relocation.isTableIndex()) {
+                    try wasm_bin.elements.appendSymbol(gpa, .{
+                        .file = object_index,
+                        .sym_index = relocation.index,
+                    });
+                }
             }
         }
 

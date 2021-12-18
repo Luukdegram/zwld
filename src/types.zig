@@ -56,12 +56,13 @@ pub const Relocation = struct {
         }
     };
 
-    /// Verifies the relocation type of a given `Relocation` and returns
-    /// true when the relocation references a function call or address to a function.
-    pub fn isFunction(self: Relocation) bool {
+    /// Returns true when the relocation represents a table index relocatable
+    pub fn isTableIndex(self: Relocation) bool {
         return switch (self.relocation_type) {
-            .R_WASM_FUNCTION_INDEX_LEB,
+            .R_WASM_TABLE_INDEX_I32,
+            .R_WASM_TABLE_INDEX_I64,
             .R_WASM_TABLE_INDEX_SLEB,
+            .R_WASM_TABLE_INDEX_SLEB64,
             => true,
             else => false,
         };

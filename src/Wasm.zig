@@ -218,15 +218,6 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
             return error.UndefinedLocal;
         }
 
-        // if (symbol.tag == .table and
-        //     std.mem.eql(u8, symbol.name, "__indirect_function_table") and
-        //     Symbol.linker_defined.indirect_function_table == null)
-        // {
-        //     Symbol.linker_defined.indirect_function_table = symbol;
-        // }
-
-        if (symbol.tag == .table) continue;
-
         // @TODO: locals are allowed to have duplicate symbol names
         // @TODO: Store undefined symbols so we can verify at the end if they've all been found
         // if not, emit an error (unless --allow-undefined is enabled).
