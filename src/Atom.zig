@@ -133,21 +133,22 @@ pub fn resolveRelocs(self: *Atom, wasm_bin: *const Wasm) !void {
 /// The final value must be casted to the correct size.
 fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const Wasm) u64 {
     const object = wasm_bin.objects.items[self.file];
-    const symbol: Symbol = object.symtable[relocation.index];
-    const symbol_loc = wasm_bin.symbol_resolver.get(symbol.name).?;
-    const actual_symbol = symbol_loc.getSymbol(wasm_bin);
+    const symbol = (Wasm.SymbolWithLoc{
+        .file = self.file,
+        .sym_index = relocation.index,
+    }).getSymbol(wasm_bin);
     return switch (relocation.relocation_type) {
-        .R_WASM_FUNCTION_INDEX_LEB => actual_symbol.index,
-        .R_WASM_TABLE_NUMBER_LEB => actual_symbol.index,
+        .R_WASM_FUNCTION_INDEX_LEB => symbol.index,
+        .R_WASM_TABLE_NUMBER_LEB => symbol.index,
         .R_WASM_TABLE_INDEX_I32,
         .R_WASM_TABLE_INDEX_I64,
         .R_WASM_TABLE_INDEX_SLEB,
         .R_WASM_TABLE_INDEX_SLEB64,
-        => wasm_bin.elements.indirect_functions.get(symbol_loc) orelse 0,
+        => wasm_bin.elements.indirect_functions.get(.{ .file = self.file, .sym_index = relocation.index }) orelse 0,
         .R_WASM_TYPE_INDEX_LEB => wasm_bin.functions.items.items[symbol.index].type_index,
         .R_WASM_GLOBAL_INDEX_I32,
         .R_WASM_GLOBAL_INDEX_LEB,
-        => actual_symbol.index,
+        => symbol.index,
         .R_WASM_MEMORY_ADDR_I32,
         .R_WASM_MEMORY_ADDR_I64,
         .R_WASM_MEMORY_ADDR_LEB,

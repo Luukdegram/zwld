@@ -32,6 +32,9 @@ synthetic_symbols: std.StringArrayHashMapUnmanaged(Symbol) = .{},
 /// Mapping between symbol names and their respective location
 /// This map contains all symbols that will be written into the final binary.
 symbol_resolver: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+/// Maps discarded symbols and their positions to the location of the symbol
+/// it was resolved to.
+discarded: std.AutoHashMapUnmanaged(SymbolWithLoc, SymbolWithLoc) = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
@@ -80,6 +83,9 @@ pub const SymbolWithLoc = struct {
     /// From a given location, find the corresponding symbol in the wasm binary.
     pub fn getSymbol(self: SymbolWithLoc, wasm: *const Wasm) *Symbol {
         if (self.file) |file_index| {
+            if (wasm.discarded.get(self)) |new_loc| {
+                return new_loc.getSymbol(wasm);
+            }
             const object = wasm.objects.items[file_index];
             return &object.symtable[self.sym_index];
         }
@@ -139,6 +145,7 @@ pub fn deinit(self: *Wasm, gpa: Allocator) void {
         atom.deinit(gpa);
     }
     self.synthetic_symbols.deinit(gpa);
+    self.discarded.deinit(gpa);
     self.symbol_resolver.deinit(gpa);
     self.managed_atoms.deinit(gpa);
     self.atoms.deinit(gpa);
@@ -253,6 +260,7 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
         log.info("Overwriting symbol '{s}'", .{symbol.name});
         log.info("  first definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
         log.info("  next definition in '{s}'", .{object.name});
+        try self.discarded.putNoClobber(gpa, maybe_existing.value_ptr.*, location);
         maybe_existing.value_ptr.* = location;
     }
 }
