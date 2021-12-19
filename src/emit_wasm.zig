@@ -13,7 +13,7 @@ const leb = std.leb;
 const log = std.log.scoped(.zwld);
 
 /// Writes the given `Wasm` object into a binary file as-is.
-pub fn emit(wasm: *Wasm) !void {
+pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     const writer = wasm.file.writer();
     const file = wasm.file;
 
@@ -162,6 +162,77 @@ pub fn emit(wasm: *Wasm) !void {
 
         try emitSectionHeader(file, offset, .data, data_count);
     }
+
+    // names section
+    {
+        const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
+        const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
+        var funcs = try std.ArrayList(*const Symbol).initCapacity(gpa, func_count);
+        defer funcs.deinit();
+        var globals = try std.ArrayList(*const Symbol).initCapacity(gpa, global_count);
+        defer globals.deinit();
+
+        for (wasm.symbol_resolver.values()) |sym_with_loc| {
+            const symbol = sym_with_loc.getSymbol(wasm);
+            switch (symbol.tag) {
+                .function => funcs.appendAssumeCapacity(symbol),
+                .global => globals.appendAssumeCapacity(symbol),
+                else => {}, // do not emit 'names' section for other symbols
+            }
+        }
+
+        std.sort.sort(*const Symbol, funcs.items, {}, lessThan);
+        std.sort.sort(*const Symbol, globals.items, {}, lessThan);
+
+        const offset = try reserveCustomSectionHeader(file);
+        try leb.writeULEB128(writer, @intCast(u32, "name".len));
+        try writer.writeAll("name");
+
+        try emitNameSection(0x01, gpa, funcs.items, writer);
+        try emitNameSection(0x07, gpa, globals.items, writer);
+        try emitDataNamesSection(wasm, gpa, writer);
+        try emitCustomHeader(file, offset);
+    }
+}
+
+/// Sorts symbols based on the index of the object they target
+fn lessThan(context: void, lhs: *const Symbol, rhs: *const Symbol) bool {
+    _ = context;
+    return lhs.index < rhs.index;
+}
+
+fn emitSymbol(symbol: *const Symbol, writer: anytype) !void {
+    try leb.writeULEB128(writer, symbol.index);
+    try leb.writeULEB128(writer, @intCast(u32, symbol.name.len));
+    try writer.writeAll(symbol.name);
+}
+
+fn emitNameSection(name_type: u8, gpa: std.mem.Allocator, items: anytype, writer: anytype) !void {
+    var section_list = std.ArrayList(u8).init(gpa);
+    defer section_list.deinit();
+    const sec_writer = section_list.writer();
+
+    try leb.writeULEB128(sec_writer, @intCast(u32, items.len));
+    for (items) |sym| try emitSymbol(sym, sec_writer);
+    try leb.writeULEB128(writer, name_type);
+    try leb.writeULEB128(writer, @intCast(u32, section_list.items.len));
+    try writer.writeAll(section_list.items);
+}
+
+fn emitDataNamesSection(wasm: *Wasm, gpa: std.mem.Allocator, writer: anytype) !void {
+    var section_list = std.ArrayList(u8).init(gpa);
+    defer section_list.deinit();
+    const sec_writer = section_list.writer();
+
+    try leb.writeULEB128(sec_writer, @intCast(u32, wasm.data_segments.count()));
+    for (wasm.data_segments.keys()) |key, index| {
+        try leb.writeULEB128(sec_writer, @intCast(u32, index));
+        try leb.writeULEB128(sec_writer, @intCast(u32, key.len));
+        try sec_writer.writeAll(key);
+    }
+    try leb.writeULEB128(writer, @as(u8, 0x09));
+    try leb.writeULEB128(writer, @intCast(u32, section_list.items.len));
+    try writer.writeAll(section_list.items);
 }
 
 fn emitWasmHeader(writer: anytype) !void {
@@ -174,6 +245,12 @@ fn emitWasmHeader(writer: anytype) !void {
 fn reserveSectionHeader(file: fs.File) !u64 {
     // section id, section byte size, section entry count
     const header_size = 1 + 5 + 5;
+    try file.seekBy(header_size);
+    return (try file.getPos());
+}
+
+fn reserveCustomSectionHeader(file: fs.File) !u64 {
+    const header_size = 1 + 5;
     try file.seekBy(header_size);
     return (try file.getPos());
 }
@@ -197,6 +274,15 @@ fn emitSectionHeader(file: fs.File, offset: u64, section_type: std.wasm.Section,
         byte_size,
         entries,
     });
+}
+
+fn emitCustomHeader(file: fs.File, offset: u64) !void {
+    var buf: [1 + 5]u8 = undefined;
+    buf[0] = 0; // 0 = 'custom' section
+    const pos = try file.getPos();
+    const byte_size = pos - offset;
+    leb.writeUnsignedFixed(5, buf[1..6], @intCast(u32, byte_size));
+    try file.pwriteAll(&buf, offset - buf.len);
 }
 
 fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {

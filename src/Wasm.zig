@@ -204,7 +204,7 @@ pub fn flush(self: *Wasm, gpa: Allocator) !void {
     try self.setupExports(gpa);
     try self.relocateAtoms();
 
-    try @import("emit_wasm.zig").emit(self);
+    try @import("emit_wasm.zig").emit(self, gpa);
 }
 
 fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void {
