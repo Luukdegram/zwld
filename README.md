@@ -2,8 +2,9 @@
 
 Experimental linker for wasm object files.
 The idea is to implement a linker that stays close to wasm-ld in regards to features
-so that one day this could potentially be used within the Zig self-hosted compiler to incrementally
-link Zig code with other wasm object files.
+~so that one day this could potentially be used within the Zig self-hosted compiler to incrementally
+link Zig code with other wasm object files.~
+With zwld now having been upstreamed, the main development of the linker is done directly within the Zig compiler. Features and improvements will be backported to zwld at one point. Until then, this repository is mostly inactive.
 
 While there's no official specification for linking, `zwld` follows the wasm [tool-convention](https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md) closely.
 The initial goal is to support mvp features and have a base skeleton which would provide us with enough information on how
