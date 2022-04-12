@@ -92,8 +92,9 @@ pub const Imports = struct {
                 return @truncate(u32, hasher.final());
             }
 
-            pub fn eql(ctx: Ctx, lhs: ImportKey, rhs: ImportKey) bool {
+            pub fn eql(ctx: Ctx, lhs: ImportKey, rhs: ImportKey, index: usize) bool {
                 _ = ctx;
+                _ = index;
                 return std.mem.eql(u8, lhs.name, rhs.name) and
                     std.mem.eql(u8, lhs.module_name, rhs.module_name);
             }

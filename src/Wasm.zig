@@ -468,7 +468,7 @@ fn setupMemory(self: *Wasm) !void {
         if (self.code_section_index) |index| {
             if (index == i) continue;
         }
-        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, segment.alignment);
+        segment.size = std.mem.alignForwardGeneric(u32, segment.size, segment.alignment);
         memory_ptr += segment.size;
         segment.offset = offset;
         offset += segment.size;
@@ -576,7 +576,6 @@ fn allocateAtoms(self: *Wasm) !void {
 
         var offset: u32 = segment.offset;
         while (true) {
-            offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
             atom.offset = offset;
 
             const object: *Object = &self.objects.items[atom.file];
@@ -589,7 +588,7 @@ fn allocateAtoms(self: *Wasm) !void {
                 atom.size,
             });
 
-            offset += atom.size;
+            offset += std.mem.alignForwardGeneric(u32, atom.size, atom.alignment);
 
             if (atom.next) |next| {
                 atom = next;
