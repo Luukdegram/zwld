@@ -44,7 +44,7 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
         }
 
         for (wasm.imports.symbols()) |sym_with_loc| {
-            try emitImportSymbol(wasm, sym_with_loc.file.?, sym_with_loc.sym_index, writer);
+            try emitImportSymbol(wasm, sym_with_loc, writer);
         }
 
         // TODO: Also emit GOT symbols
@@ -119,19 +119,17 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
         const data_count = @intCast(u32, wasm.dataCount());
         log.debug("Writing 'Data' section ({d})", .{data_count});
         const offset = try reserveSectionHeader(file);
-        const base_offset = wasm.options.global_base orelse 1024;
 
         var it = wasm.data_segments.iterator();
         while (it.next()) |entry| {
             // do not output the 'bss' section
-            if (std.mem.eql(u8, entry.key_ptr.*, ".bss")) continue;
+            if (std.mem.eql(u8, entry.key_ptr.*, ".bss") and !wasm.options.import_memory) continue;
             const atom_index = entry.value_ptr.*;
             var atom = wasm.atoms.getPtr(atom_index).?.*.getFirst();
             const segment = wasm.segments.items[atom_index];
-            const segment_offset = base_offset + segment.offset;
 
             try leb.writeULEB128(writer, @as(u32, 0)); // flag and memory index (always 0);
-            try emitInitExpression(.{ .i32_const = @bitCast(i32, segment_offset) }, writer);
+            try emitInitExpression(.{ .i32_const = @bitCast(i32, segment.offset) }, writer);
             try leb.writeULEB128(writer, segment.size);
 
             var current_offset: u32 = 0;
@@ -144,8 +142,8 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
                     current_offset += diff;
                 }
                 std.debug.assert(current_offset == atom.offset);
-                try writer.writeAll(atom.code.items);
                 std.debug.assert(atom.code.items.len == atom.size);
+                try writer.writeAll(atom.code.items);
 
                 current_offset += atom.size;
                 if (atom.next) |next| {
@@ -154,10 +152,12 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
                     // Also make sure that if the last atom has extra bytes, we write 0's.
                     if (current_offset != segment.size) {
                         try writer.writeByteNTimes(0, segment.size - current_offset);
+                        current_offset += segment.size - current_offset;
                     }
                     break;
                 }
             }
+            std.debug.assert(current_offset == segment.size);
         }
 
         try emitSectionHeader(file, offset, .data, data_count);
@@ -298,11 +298,10 @@ fn emitType(type_entry: std.wasm.Type, writer: anytype) !void {
     }
 }
 
-fn emitImportSymbol(wasm: *const Wasm, object_index: u16, symbol_index: u32, writer: anytype) !void {
-    const object = wasm.objects.items[object_index];
-    const symbol = object.symtable[symbol_index];
+fn emitImportSymbol(wasm: *const Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anytype) !void {
+    const symbol = sym_loc.getSymbol(wasm).*;
     var import: std.wasm.Import = .{
-        .module_name = object.imports[symbol.index].module_name,
+        .module_name = undefined,
         .name = symbol.name,
         .kind = undefined,
     };
@@ -312,16 +311,19 @@ fn emitImportSymbol(wasm: *const Wasm, object_index: u16, symbol_index: u32, wri
             const value = wasm.imports.imported_functions.values()[symbol.index];
             std.debug.assert(value.index == symbol.index);
             import.kind = .{ .function = value.type };
+            import.module_name = wasm.imports.imported_functions.keys()[symbol.index].module_name;
         },
         .global => {
             const value = wasm.imports.imported_globals.values()[symbol.index];
             std.debug.assert(value.index == symbol.index);
             import.kind = .{ .global = value.global };
+            import.module_name = wasm.imports.imported_globals.keys()[symbol.index].module_name;
         },
         .table => {
             const value = wasm.imports.imported_tables.values()[symbol.index];
             std.debug.assert(value.index == symbol.index);
             import.kind = .{ .table = value.table };
+            import.module_name = wasm.imports.imported_tables.keys()[symbol.index].module_name;
         },
         else => unreachable,
     }

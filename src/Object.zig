@@ -692,6 +692,12 @@ fn Parser(comptime ReaderType: type) type {
                         const name = try gpa.alloc(u8, name_len);
                         try reader.readNoEof(name);
                         symbol.name = name;
+
+                        // when the symbol is undefined, we want to take the import's name,
+                        // regardless if the name was explicit or not.
+                        if (is_undefined) {
+                            symbol.name = maybe_import.?.name;
+                        }
                     } else {
                         symbol.name = maybe_import.?.name;
                     }
@@ -823,7 +829,6 @@ pub fn parseIntoAtoms(self: *Object, gpa: Allocator, object_index: u16, wasm_bin
 
         const segment: *Wasm.Segment = &wasm_bin.segments.items[final_index];
         segment.alignment = std.math.max(segment.alignment, atom.alignment);
-        segment.size += std.mem.alignForwardGeneric(u32, atom.size, atom.alignment);
 
         if (wasm_bin.atoms.getPtr(final_index)) |last| {
             last.*.next = atom;

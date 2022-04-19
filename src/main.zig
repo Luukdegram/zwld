@@ -56,7 +56,7 @@ pub fn main() !void {
 
     var positionals = std.ArrayList([]const u8).init(arena);
     var entry_name: ?[]const u8 = null;
-    var global_base: ?u32 = null;
+    var global_base: ?u32 = 1024;
     var import_memory: bool = false;
     var import_table: bool = false;
     var initial_memory: ?u32 = null;

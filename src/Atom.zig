@@ -84,6 +84,7 @@ pub fn getLast(self: *Atom) *Atom {
 /// Resolves the relocations within the atom, writing the new value
 /// at the calculated offset.
 pub fn resolveRelocs(self: *Atom, wasm_bin: *const Wasm) !void {
+    if (self.relocs.items.len == 0) return;
     const object = wasm_bin.objects.items[self.file];
     const symbol: Symbol = object.symtable[self.sym_index];
 
@@ -137,47 +138,47 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
         .file = self.file,
         .sym_index = relocation.index,
     }).getSymbol(wasm_bin);
-    return switch (relocation.relocation_type) {
-        .R_WASM_FUNCTION_INDEX_LEB => symbol.index,
-        .R_WASM_TABLE_NUMBER_LEB => symbol.index,
+    switch (relocation.relocation_type) {
+        .R_WASM_FUNCTION_INDEX_LEB => return symbol.index,
+        .R_WASM_TABLE_NUMBER_LEB => return symbol.index,
         .R_WASM_TABLE_INDEX_I32,
         .R_WASM_TABLE_INDEX_I64,
         .R_WASM_TABLE_INDEX_SLEB,
         .R_WASM_TABLE_INDEX_SLEB64,
-        => wasm_bin.elements.indirect_functions.get(.{ .file = self.file, .sym_index = relocation.index }) orelse 0,
-        .R_WASM_TYPE_INDEX_LEB => wasm_bin.functions.items.items[symbol.index].type_index,
+        => return wasm_bin.elements.indirect_functions.get(.{ .file = self.file, .sym_index = relocation.index }) orelse 0,
+        .R_WASM_TYPE_INDEX_LEB => return wasm_bin.functions.items.items[symbol.index].type_index,
         .R_WASM_GLOBAL_INDEX_I32,
         .R_WASM_GLOBAL_INDEX_LEB,
-        => symbol.index,
+        => return symbol.index,
         .R_WASM_MEMORY_ADDR_I32,
         .R_WASM_MEMORY_ADDR_I64,
         .R_WASM_MEMORY_ADDR_LEB,
         .R_WASM_MEMORY_ADDR_LEB64,
         .R_WASM_MEMORY_ADDR_SLEB,
         .R_WASM_MEMORY_ADDR_SLEB64,
-        => blk: {
-            if (symbol.isUndefined() and (symbol.tag == .data or symbol.isWeak())) {
+        => {
+            if (symbol.isUndefined() and symbol.isWeak()) {
                 return 0;
             }
+            std.debug.assert(symbol.tag == .data);
             const segment_name = object.segment_info[symbol.index].outputName();
             const atom_index = wasm_bin.data_segments.get(segment_name).?;
             var target_atom = wasm_bin.atoms.getPtr(atom_index).?.*.getFirst();
             while (true) {
-                if (target_atom.sym_index == relocation.index) break;
-                if (target_atom.next) |next| {
-                    target_atom = next;
-                } else break;
+                if (target_atom.sym_index == relocation.index and target_atom.file == self.file) {
+                    break;
+                }
+                target_atom = target_atom.next orelse return 0;
             }
             const segment = wasm_bin.segments.items[atom_index];
-            const base = wasm_bin.options.global_base orelse 1024;
             const offset = target_atom.offset + segment.offset;
-            break :blk offset + base + (relocation.addend orelse 0);
+            return offset + (relocation.addend orelse 0);
         },
-        .R_WASM_EVENT_INDEX_LEB => symbol.index,
+        .R_WASM_EVENT_INDEX_LEB => return symbol.index,
         .R_WASM_SECTION_OFFSET_I32,
         .R_WASM_FUNCTION_OFFSET_I32,
-        => relocation.offset,
-    };
+        => return relocation.offset,
+    }
 }
 
 /// Determines if a given symbol requires access to the global offset table

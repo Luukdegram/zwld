@@ -82,10 +82,9 @@ pub const SymbolWithLoc = struct {
 
     /// From a given location, find the corresponding symbol in the wasm binary.
     pub fn getSymbol(self: SymbolWithLoc, wasm: *const Wasm) *Symbol {
+        if (wasm.discarded.get(self)) |new_loc| return new_loc.getSymbol(wasm);
+
         if (self.file) |file_index| {
-            if (wasm.discarded.get(self)) |new_loc| {
-                return new_loc.getSymbol(wasm);
-            }
             const object = wasm.objects.items[file_index];
             return &object.symtable[self.sym_index];
         }
@@ -179,7 +178,7 @@ pub fn addObjects(self: *Wasm, gpa: Allocator, file_paths: []const []const u8) !
 pub fn dataCount(self: Wasm) u32 {
     var i: u32 = 0;
     for (self.data_segments.keys()) |key| {
-        if (std.mem.eql(u8, key, ".bss")) continue;
+        if (std.mem.eql(u8, key, ".bss") and !self.options.import_memory) continue;
         i += 1;
     }
     return i;
@@ -459,28 +458,47 @@ fn setupMemory(self: *Wasm) !void {
     const page_size = 64 * 1024;
     const stack_size = self.options.stack_size orelse page_size * 1;
     const stack_alignment = 16;
-    var memory_ptr: u32 = self.options.global_base orelse 1024;
-    memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
+    const stack_first = self.options.stack_first;
 
-    var offset: u32 = 0;
+    var memory_ptr: u32 = 0;
+    if (!stack_first and self.options.global_base != null) {
+        memory_ptr = self.options.global_base.?;
+    }
+
+    if (stack_first) {
+        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
+        memory_ptr += stack_size;
+        // set stack value on global
+        if (self.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
+            const global: *std.wasm.Global = &self.globals.items.items[stack_pointer.index];
+            global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
+        }
+    }
+
+    var offset: u32 = memory_ptr;
     for (self.segments.items) |*segment, i| {
         // skip 'code' segments
         if (self.code_section_index) |index| {
             if (index == i) continue;
         }
-        segment.size = std.mem.alignForwardGeneric(u32, segment.size, segment.alignment);
+        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, segment.alignment);
         memory_ptr += segment.size;
         segment.offset = offset;
         offset += segment.size;
     }
 
-    memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
-    // TODO: Calculate this according to user input
-    memory_ptr += stack_size;
+    if (!stack_first) {
+        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
+        memory_ptr += stack_size;
+        // set stack value on global
+        if (self.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
+            const global: *std.wasm.Global = &self.globals.items.items[stack_pointer.index];
+            global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
+        }
+    }
 
     // Setup the max amount of pages
     const max_memory_allowed: u32 = (1 << 32) - 1;
-
     if (self.options.initial_memory) |initial_memory| {
         if (!std.mem.isAligned(initial_memory, page_size)) {
             log.err("Initial memory must be {d}-byte aligned", .{page_size});
@@ -517,12 +535,6 @@ fn setupMemory(self: *Wasm) !void {
         }
         self.memories.limits.max = max_memory / page_size;
         log.debug("Maximum memory pages: {d}", .{self.memories.limits.max});
-    }
-
-    // set stack value on global
-    if (self.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
-        const global: *std.wasm.Global = &self.globals.items.items[stack_pointer.index];
-        global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
     }
 }
 
@@ -569,15 +581,15 @@ fn allocateAtoms(self: *Wasm) !void {
     var it = self.atoms.iterator();
     while (it.next()) |entry| {
         const segment_index = entry.key_ptr.*;
-        const segment: Segment = self.segments.items[segment_index];
+        const segment: *Segment = &self.segments.items[segment_index];
         var atom: *Atom = entry.value_ptr.*.getFirst();
 
         log.debug("Allocating atoms for segment '{d}'", .{segment_index});
 
-        var offset: u32 = segment.offset;
+        var offset: u32 = 0;
         while (true) {
+            offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
             atom.offset = offset;
-
             const object: *Object = &self.objects.items[atom.file];
             const symbol = &object.symtable[atom.sym_index];
 
@@ -588,12 +600,11 @@ fn allocateAtoms(self: *Wasm) !void {
                 atom.size,
             });
 
-            offset += std.mem.alignForwardGeneric(u32, atom.size, atom.alignment);
-
-            if (atom.next) |next| {
-                atom = next;
-            } else break;
+            offset += atom.size;
+            atom = atom.next orelse break;
         }
+
+        segment.size = std.mem.alignForwardGeneric(u32, offset, segment.alignment);
     }
 }
 
@@ -604,9 +615,7 @@ fn relocateAtoms(self: *Wasm) !void {
         while (true) {
             // First perform relocations to rewrite the binary data
             try atom.resolveRelocs(self);
-            if (atom.next) |next| {
-                atom = next;
-            } else break;
+            atom = atom.next orelse break;
         }
     }
 }
