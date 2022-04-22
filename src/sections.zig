@@ -421,7 +421,8 @@ pub const Elements = struct {
     pub fn appendSymbol(self: *Elements, gpa: Allocator, symbol_loc: Wasm.SymbolWithLoc) !void {
         const gop = try self.indirect_functions.getOrPut(gpa, symbol_loc);
         if (gop.found_existing) return;
-        gop.value_ptr.* = self.functionCount();
+        // start at index 1 so the index '0' is an invalid function pointer
+        gop.value_ptr.* = self.functionCount() + 1;
     }
 
     pub fn functionCount(self: Elements) u32 {

@@ -409,7 +409,7 @@ fn emitElement(wasm: *const Wasm, writer: anytype) !void {
     if (index) |idx|
         try leb.writeULEB128(writer, idx);
 
-    try emitInitExpression(.{ .i32_const = 0 }, writer);
+    try emitInitExpression(.{ .i32_const = 1 }, writer);
     if (flags & 0x3 != 0) {
         try leb.writeULEB128(writer, @as(u8, 0));
     }
