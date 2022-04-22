@@ -29,9 +29,9 @@ atoms: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
 /// All symbols created by the linker, rather than through
 /// object files will be inserted in this list to manage them.
 synthetic_symbols: std.StringArrayHashMapUnmanaged(Symbol) = .{},
-/// Mapping between symbol names and their respective location
-/// This map contains all symbols that will be written into the final binary.
-symbol_resolver: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+/// List of all symbol locations which have been resolved by the linker
+/// and will be emit into the final binary.
+resolved_symbols: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, void) = .{},
 /// Maps discarded symbols and their positions to the location of the symbol
 /// it was resolved to.
 discarded: std.AutoHashMapUnmanaged(SymbolWithLoc, SymbolWithLoc) = .{},
@@ -145,7 +145,7 @@ pub fn deinit(self: *Wasm, gpa: Allocator) void {
     }
     self.synthetic_symbols.deinit(gpa);
     self.discarded.deinit(gpa);
-    self.symbol_resolver.deinit(gpa);
+    self.resolved_symbols.deinit(gpa);
     self.managed_atoms.deinit(gpa);
     self.atoms.deinit(gpa);
     self.data_segments.deinit(gpa);
@@ -218,24 +218,22 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
             .sym_index = sym_idx,
         };
 
-        if (symbol.isLocal() and symbol.isUndefined()) {
-            log.err("Local symbols are not allowed to reference imports", .{});
-            log.err("  symbol '{s}' defined in '{s}'", .{ symbol.name, object.name });
-            return error.UndefinedLocal;
+        if (symbol.isLocal()) {
+            if (symbol.isUndefined()) {
+                log.err("Local symbols are not allowed to reference imports", .{});
+                log.err("  symbol '{s}' defined in '{s}'", .{ symbol.name, object.name });
+                return error.undefinedLocal;
+            }
+            try self.resolved_symbols.putNoClobber(gpa, location, {});
+            continue;
         }
 
-        // @TODO: locals are allowed to have duplicate symbol names
-        // @TODO: Store undefined symbols so we can verify at the end if they've all been found
+        // TODO: Store undefined symbols so we can verify at the end if they've all been found
         // if not, emit an error (unless --allow-undefined is enabled).
-        const maybe_existing = try self.symbol_resolver.getOrPut(gpa, symbol.name);
+        const maybe_existing = try self.global_symbols.getOrPut(gpa, symbol.name);
         if (!maybe_existing.found_existing) {
             maybe_existing.value_ptr.* = location;
-
-            // If it's a global, also save it in the global list
-            // @TODO: Remove this once we make it easier to find global symbols
-            if (symbol.isGlobal()) {
-                try self.global_symbols.putNoClobber(gpa, symbol.name, location);
-            }
+            try self.resolved_symbols.putNoClobber(gpa, location, {});
             continue;
         }
 
@@ -243,31 +241,37 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
         const existing_sym: *Symbol = existing_loc.getSymbol(self);
 
         if (!existing_sym.isUndefined()) {
-            if (existing_sym.isGlobal() and symbol.isGlobal() and !symbol.isUndefined()) {
-                log.err("symbol '{s}' defined multiple times", .{existing_sym.name});
-                log.err("  first definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
-                log.err("  next definition in '{s}'", .{object.name});
+            if (!symbol.isUndefined()) {
+                log.info("Overwriting symbol '{s}'", .{symbol.name});
+                log.info("  first definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
+                log.info("  next definition in '{s}'", .{object.name});
                 return error.SymbolCollision;
             }
 
-            if (symbol.isUndefined()) {
-                continue; // Do not overwrite defined symbols with undefined symbols
-            }
+            continue; // Do not overwrite defined symbols with undefined symbols
+        }
+
+        // when both symbols are weak, we skip overwriting
+        if (existing_sym.isWeak() and symbol.isWeak()) {
+            continue;
         }
 
         // simply overwrite with the new symbol
-        log.info("Overwriting symbol '{s}'", .{symbol.name});
-        log.info("  first definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
-        log.info("  next definition in '{s}'", .{object.name});
+        log.debug("Overwriting symbol '{s}'", .{symbol.name});
+        log.debug("  old definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
+        log.debug("  new definition in '{s}'", .{object.name});
         try self.discarded.putNoClobber(gpa, maybe_existing.value_ptr.*, location);
         maybe_existing.value_ptr.* = location;
+        try self.global_symbols.put(gpa, symbol.name, location);
+        try self.resolved_symbols.put(gpa, location, {});
+        std.debug.assert(self.resolved_symbols.swapRemove(existing_loc));
     }
 }
 
 /// Calculates the new indexes for symbols and their respective symbols
 fn mergeSections(self: *Wasm, gpa: Allocator) !void {
     // first append the indirect function table if initialized
-    if (self.symbol_resolver.get("__indirect_function_table")) |sym_with_loc| {
+    if (self.global_symbols.get("__indirect_function_table")) |sym_with_loc| {
         log.debug("Appending indirect function table", .{});
         const object: Object = self.objects.items[sym_with_loc.file.?];
         const symbol = sym_with_loc.getSymbol(self);
@@ -276,7 +280,7 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
     }
 
     log.debug("Merging sections", .{});
-    for (self.symbol_resolver.values()) |sym_with_loc| {
+    for (self.resolved_symbols.keys()) |sym_with_loc| {
         const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
         if (symbol.isUndefined()) continue; // skip imports
@@ -318,7 +322,7 @@ fn mergeSections(self: *Wasm, gpa: Allocator) !void {
 
 fn mergeTypes(self: *Wasm, gpa: Allocator) !void {
     log.debug("Merging types", .{});
-    for (self.symbol_resolver.values()) |sym_with_loc| {
+    for (self.resolved_symbols.keys()) |sym_with_loc| {
         const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
         if (symbol.tag == .function) {
@@ -390,7 +394,8 @@ fn setupLinkerSymbols(self: *Wasm, gpa: Allocator) !void {
     const sym_index = @intCast(u32, self.synthetic_symbols.count());
     const loc: SymbolWithLoc = .{ .sym_index = sym_index, .file = null };
     try self.synthetic_symbols.putNoClobber(gpa, symbol.name, symbol);
-    try self.symbol_resolver.putNoClobber(gpa, symbol.name, loc);
+    try self.resolved_symbols.putNoClobber(gpa, loc, {});
+    try self.global_symbols.putNoClobber(gpa, symbol.name, loc);
 }
 
 const SymbolIterator = struct {
@@ -428,7 +433,7 @@ const SymbolIterator = struct {
 };
 
 fn mergeImports(self: *Wasm, gpa: Allocator) !void {
-    const maybe_func_table = self.symbol_resolver.get("__indirect_function_table");
+    const maybe_func_table = self.global_symbols.get("__indirect_function_table");
     if (self.options.import_table) {
         const sym_with_loc = maybe_func_table orelse {
             log.err("Required import __indirect_function_table is missing from object files", .{});
@@ -437,14 +442,14 @@ fn mergeImports(self: *Wasm, gpa: Allocator) !void {
         try self.imports.appendSymbol(gpa, self, sym_with_loc);
     }
 
-    for (self.symbol_resolver.values()) |sym_with_loc| {
+    for (self.resolved_symbols.keys()) |sym_with_loc| {
         const symbol = sym_with_loc.getSymbol(self);
         if (symbol.tag != .data) {
             if (!symbol.requiresImport()) {
                 continue;
             }
-            if (maybe_func_table) |table_loc| {
-                if (std.meta.eql(table_loc, sym_with_loc)) continue;
+            if (std.mem.eql(u8, symbol.name, "__indirect_function_table")) {
+                continue;
             }
             log.debug("Symbol '{s}' will be imported", .{symbol.name});
             try self.imports.appendSymbol(gpa, self, sym_with_loc);

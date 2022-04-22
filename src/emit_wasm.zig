@@ -172,7 +172,7 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
         var globals = try std.ArrayList(*const Symbol).initCapacity(gpa, global_count);
         defer globals.deinit();
 
-        for (wasm.symbol_resolver.values()) |sym_with_loc| {
+        for (wasm.resolved_symbols.keys()) |sym_with_loc| {
             const symbol = sym_with_loc.getSymbol(wasm);
             switch (symbol.tag) {
                 .function => funcs.appendAssumeCapacity(symbol),
@@ -401,7 +401,7 @@ fn emitExport(exported: std.wasm.Export, writer: anytype) !void {
 
 fn emitElement(wasm: *const Wasm, writer: anytype) !void {
     var flags: u32 = 0;
-    var index: ?u32 = if (wasm.symbol_resolver.get("__indirect_function_table")) |sym_loc| blk: {
+    var index: ?u32 = if (wasm.global_symbols.get("__indirect_function_table")) |sym_loc| blk: {
         flags |= 0x2;
         break :blk sym_loc.getSymbol(wasm).index;
     } else null;
