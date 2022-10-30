@@ -4,6 +4,7 @@ const Wasm = @This();
 const std = @import("std");
 const Atom = @import("Atom.zig");
 const Object = @import("Object.zig");
+const Archive = @import("Archive.zig");
 const types = @import("types.zig");
 const Symbol = @import("Symbol.zig");
 const sections = @import("sections.zig");
@@ -20,6 +21,10 @@ file: fs.File,
 options: Options,
 /// A list with references to objects we link to during `flush()`
 objects: std.ArrayListUnmanaged(Object) = .{},
+/// A list of archive files which are lazily linked with the final binary.
+/// Referencing a Symbol from any of its object files will cause the object
+/// file to be linked into the final binary.
+archives: std.ArrayListUnmanaged(Archive) = .{},
 /// A map of global names to their symbol location in an object file
 global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
 /// Contains all atoms that have been created, used to clean up
@@ -81,14 +86,14 @@ pub const SymbolWithLoc = struct {
     file: ?u16,
 
     /// From a given location, find the corresponding symbol in the wasm binary.
-    pub fn getSymbol(self: SymbolWithLoc, wasm: *const Wasm) *Symbol {
-        if (wasm.discarded.get(self)) |new_loc| return new_loc.getSymbol(wasm);
+    pub fn getSymbol(loc: SymbolWithLoc, wasm: *const Wasm) *Symbol {
+        if (wasm.discarded.get(loc)) |new_loc| return new_loc.getSymbol(wasm);
 
-        if (self.file) |file_index| {
+        if (loc.file) |file_index| {
             const object = wasm.objects.items[file_index];
-            return &object.symtable[self.sym_index];
+            return &object.symtable[loc.sym_index];
         }
-        return &wasm.synthetic_symbols.values()[self.sym_index];
+        return &wasm.synthetic_symbols.values()[loc.sym_index];
     }
 };
 
@@ -135,50 +140,114 @@ pub fn openPath(path: []const u8, options: Options) !Wasm {
 
 /// Releases any resources that is owned by `Wasm`,
 /// usage after calling deinit is illegal behaviour.
-pub fn deinit(self: *Wasm, gpa: Allocator) void {
-    for (self.objects.items) |*object| {
+pub fn deinit(wasm: *Wasm, gpa: Allocator) void {
+    for (wasm.objects.items) |*object| {
         object.file.?.close();
         object.deinit(gpa);
     }
-    for (self.managed_atoms.items) |atom| {
+    for (wasm.managed_atoms.items) |atom| {
         atom.deinit(gpa);
     }
-    self.synthetic_symbols.deinit(gpa);
-    self.discarded.deinit(gpa);
-    self.resolved_symbols.deinit(gpa);
-    self.managed_atoms.deinit(gpa);
-    self.atoms.deinit(gpa);
-    self.data_segments.deinit(gpa);
-    self.segments.deinit(gpa);
-    self.global_symbols.deinit(gpa);
-    self.objects.deinit(gpa);
-    self.functions.deinit(gpa);
-    self.types.deinit(gpa);
-    self.imports.deinit(gpa);
-    self.globals.deinit(gpa);
-    self.exports.deinit(gpa);
-    self.elements.deinit(gpa);
-    self.tables.deinit(gpa);
-    self.file.close();
-    self.* = undefined;
+    wasm.synthetic_symbols.deinit(gpa);
+    wasm.discarded.deinit(gpa);
+    wasm.resolved_symbols.deinit(gpa);
+    wasm.managed_atoms.deinit(gpa);
+    wasm.atoms.deinit(gpa);
+    wasm.data_segments.deinit(gpa);
+    wasm.segments.deinit(gpa);
+    wasm.global_symbols.deinit(gpa);
+    wasm.objects.deinit(gpa);
+    wasm.functions.deinit(gpa);
+    wasm.types.deinit(gpa);
+    wasm.imports.deinit(gpa);
+    wasm.globals.deinit(gpa);
+    wasm.exports.deinit(gpa);
+    wasm.elements.deinit(gpa);
+    wasm.tables.deinit(gpa);
+    wasm.file.close();
+    wasm.* = undefined;
 }
 
-/// Parses objects from the given paths as well as append them to `self`
-pub fn addObjects(self: *Wasm, gpa: Allocator, file_paths: []const []const u8) !void {
-    for (file_paths) |path| {
-        const file = try fs.cwd().openFile(path, .{});
-        errdefer file.close();
-        var object = try Object.init(gpa, file, path);
-        errdefer object.deinit(gpa);
-        try self.objects.append(gpa, object);
+pub fn parseInputFiles(wasm: *Wasm, gpa: Allocator, files: []const []const u8) !void {
+    for (files) |path| {
+        if (try wasm.parseObjectFile(gpa, path)) continue;
+        if (try wasm.parseArchive(gpa, path, false)) continue; // load archives lazily
+        log.warn("Unexpected file format at path: '{s}'", .{path});
     }
+}
+
+/// Attempts to parse an object file. Returns `false` when given path
+/// does not represent an object file.
+fn parseObjectFile(wasm: *Wasm, gpa: Allocator, path: []const u8) !bool {
+    const file = try fs.cwd().openFile(path, .{});
+    errdefer file.close();
+    var object = Object.create(gpa, file, path) catch |err| switch (err) {
+        error.InvalidMagicByte, error.NotObjectFile => {
+            file.close();
+            return false;
+        },
+        else => |e| return e,
+    };
+    errdefer object.deinit(gpa);
+    try wasm.objects.append(gpa, object);
+    return true;
+}
+
+/// Parses an archive file and will then parse each object file
+/// that was found in the archive file.
+/// Returns false when the file is not an archive file.
+/// May return an error instead when parsing failed.
+///
+/// When `force_load` is `true`, it will for link all object files in the archive.
+/// When false, it will only link with object files that contain symbols that
+/// are referenced by other object files or Zig code.
+fn parseArchive(wasm: *Wasm, gpa: Allocator, path: []const u8, force_load: bool) !bool {
+    const file = try fs.cwd().openFile(path, .{});
+    errdefer file.close();
+
+    var archive: Archive = .{
+        .file = file,
+        .name = path,
+    };
+    archive.parse(gpa) catch |err| switch (err) {
+        error.EndOfStream, error.NotArchive => {
+            archive.deinit(gpa);
+            return false;
+        },
+        else => |e| return e,
+    };
+
+    if (!force_load) {
+        errdefer archive.deinit(gpa);
+        try wasm.archives.append(gpa, archive);
+        return true;
+    }
+    defer archive.deinit(gpa);
+
+    // In this case we must force link all embedded object files within the archive
+    // We loop over all symbols, and then group them by offset as the offset
+    // notates where the object file starts.
+    var offsets = std.AutoArrayHashMap(u32, void).init(gpa);
+    defer offsets.deinit();
+    for (archive.toc.values()) |symbol_offsets| {
+        for (symbol_offsets.items) |sym_offset| {
+            try offsets.put(sym_offset, {});
+        }
+    }
+
+    for (offsets.keys()) |file_offset| {
+        const object = try wasm.objects.addOne(gpa);
+        object.* = try archive.parseObject(gpa, file_offset);
+    }
+
+    return true;
 }
 
 /// Returns the data section entry count, skipping the .bss section
-pub fn dataCount(self: Wasm) u32 {
+pub fn dataCount(wasm: Wasm) u32 {
     var i: u32 = 0;
-    for (self.data_segments.keys()) |key| {
-        if (std.mem.eql(u8, key, ".bss") and !self.options.import_memory) continue;
+    for (wasm.data_segments.keys()) |key| {
+        if (std.mem.eql(u8, key, ".bss") and !wasm.options.import_memory) continue;
         i += 1;
     }
     return i;
@@ -186,28 +255,28 @@ pub fn dataCount(self: Wasm) u32 {
 
 /// Flushes the `Wasm` construct into a final wasm binary by linking
 /// the objects, ensuring the final binary file has no collisions.
-pub fn flush(self: *Wasm, gpa: Allocator) !void {
-    try self.setupLinkerSymbols(gpa);
-    for (self.objects.items) |_, obj_idx| {
-        try self.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
+pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
+    try wasm.setupLinkerSymbols(gpa);
+    for (wasm.objects.items) |_, obj_idx| {
+        try wasm.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
-    for (self.objects.items) |*object, obj_idx| {
-        try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), self);
+    for (wasm.objects.items) |*object, obj_idx| {
+        try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), wasm);
     }
-    try self.setupStart();
-    try self.mergeImports(gpa);
-    try self.allocateAtoms();
-    try self.setupMemory();
-    try self.mergeSections(gpa);
-    try self.mergeTypes(gpa);
-    try self.setupExports(gpa);
-    try self.relocateAtoms();
+    try wasm.setupStart();
+    try wasm.mergeImports(gpa);
+    try wasm.allocateAtoms();
+    try wasm.setupMemory();
+    try wasm.mergeSections(gpa);
+    try wasm.mergeTypes(gpa);
+    try wasm.setupExports(gpa);
+    try wasm.relocateAtoms();
 
-    try @import("emit_wasm.zig").emit(self, gpa);
+    try @import("emit_wasm.zig").emit(wasm, gpa);
 }
 
-fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void {
-    const object: Object = self.objects.items[object_index];
+fn resolveSymbolsInObject(wasm: *Wasm, gpa: Allocator, object_index: u16) !void {
+    const object: Object = wasm.objects.items[object_index];
 
     log.debug("resolving symbols in {s}", .{object.name});
 
@@ -224,26 +293,26 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
                 log.err("  symbol '{s}' defined in '{s}'", .{ symbol.name, object.name });
                 return error.undefinedLocal;
             }
-            try self.resolved_symbols.putNoClobber(gpa, location, {});
+            try wasm.resolved_symbols.putNoClobber(gpa, location, {});
             continue;
         }
 
         // TODO: Store undefined symbols so we can verify at the end if they've all been found
         // if not, emit an error (unless --allow-undefined is enabled).
-        const maybe_existing = try self.global_symbols.getOrPut(gpa, symbol.name);
+        const maybe_existing = try wasm.global_symbols.getOrPut(gpa, symbol.name);
         if (!maybe_existing.found_existing) {
             maybe_existing.value_ptr.* = location;
-            try self.resolved_symbols.putNoClobber(gpa, location, {});
+            try wasm.resolved_symbols.putNoClobber(gpa, location, {});
             continue;
         }
 
         const existing_loc = maybe_existing.value_ptr.*;
-        const existing_sym: *Symbol = existing_loc.getSymbol(self);
+        const existing_sym: *Symbol = existing_loc.getSymbol(wasm);
 
         if (!existing_sym.isUndefined()) {
             if (!symbol.isUndefined()) {
                 log.info("Overwriting symbol '{s}'", .{symbol.name});
-                log.info("  first definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
+                log.info("  first definition in '{s}'", .{wasm.objects.items[existing_loc.file.?].name});
                 log.info("  next definition in '{s}'", .{object.name});
                 return error.SymbolCollision;
             }
@@ -258,98 +327,98 @@ fn resolveSymbolsInObject(self: *Wasm, gpa: Allocator, object_index: u16) !void 
 
         // simply overwrite with the new symbol
         log.debug("Overwriting symbol '{s}'", .{symbol.name});
-        log.debug("  old definition in '{s}'", .{self.objects.items[existing_loc.file.?].name});
+        log.debug("  old definition in '{s}'", .{wasm.objects.items[existing_loc.file.?].name});
         log.debug("  new definition in '{s}'", .{object.name});
-        try self.discarded.putNoClobber(gpa, maybe_existing.value_ptr.*, location);
+        try wasm.discarded.putNoClobber(gpa, maybe_existing.value_ptr.*, location);
         maybe_existing.value_ptr.* = location;
-        try self.global_symbols.put(gpa, symbol.name, location);
-        try self.resolved_symbols.put(gpa, location, {});
-        std.debug.assert(self.resolved_symbols.swapRemove(existing_loc));
+        try wasm.global_symbols.put(gpa, symbol.name, location);
+        try wasm.resolved_symbols.put(gpa, location, {});
+        std.debug.assert(wasm.resolved_symbols.swapRemove(existing_loc));
     }
 }
 
 /// Calculates the new indexes for symbols and their respective symbols
-fn mergeSections(self: *Wasm, gpa: Allocator) !void {
+fn mergeSections(wasm: *Wasm, gpa: Allocator) !void {
     // first append the indirect function table if initialized
-    if (self.global_symbols.get("__indirect_function_table")) |sym_with_loc| {
+    if (wasm.global_symbols.get("__indirect_function_table")) |sym_with_loc| {
         log.debug("Appending indirect function table", .{});
-        const object: Object = self.objects.items[sym_with_loc.file.?];
-        const symbol = sym_with_loc.getSymbol(self);
+        const object: Object = wasm.objects.items[sym_with_loc.file.?];
+        const symbol = sym_with_loc.getSymbol(wasm);
         const imp = object.findImport(.table, object.symtable[sym_with_loc.sym_index].index);
-        symbol.index = try self.tables.append(gpa, self.imports.tableCount(), imp.kind.table);
+        symbol.index = try wasm.tables.append(gpa, wasm.imports.tableCount(), imp.kind.table);
     }
 
     log.debug("Merging sections", .{});
-    for (self.resolved_symbols.keys()) |sym_with_loc| {
-        const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
+    for (wasm.resolved_symbols.keys()) |sym_with_loc| {
+        const object = wasm.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
         if (symbol.isUndefined()) continue; // skip imports
         switch (symbol.tag) {
             .function => {
                 const offset = object.importedCountByKind(.function);
                 const original_func = object.functions[symbol.index - offset];
-                symbol.index = try self.functions.append(
+                symbol.index = try wasm.functions.append(
                     gpa,
-                    self.imports.functionCount(),
+                    wasm.imports.functionCount(),
                     original_func,
                 );
             },
             .global => {
                 const offset = object.importedCountByKind(.global);
                 const original_global = object.globals[symbol.index - offset];
-                symbol.index = try self.globals.append(
+                symbol.index = try wasm.globals.append(
                     gpa,
-                    self.imports.globalCount(),
+                    wasm.imports.globalCount(),
                     original_global,
                 );
             },
             .table => {
                 const offset = object.importedCountByKind(.table);
                 const original_table = object.tables[symbol.index - offset];
-                symbol.index = try self.tables.append(
+                symbol.index = try wasm.tables.append(
                     gpa,
-                    self.imports.tableCount(),
+                    wasm.imports.tableCount(),
                     original_table,
                 );
             },
             else => {},
         }
     }
-    log.debug("Merged ({d}) functions", .{self.functions.count()});
-    log.debug("Merged ({d}) globals", .{self.globals.count()});
-    log.debug("Merged ({d}) tables", .{self.tables.count()});
+    log.debug("Merged ({d}) functions", .{wasm.functions.count()});
+    log.debug("Merged ({d}) globals", .{wasm.globals.count()});
+    log.debug("Merged ({d}) tables", .{wasm.tables.count()});
 }
 
-fn mergeTypes(self: *Wasm, gpa: Allocator) !void {
+fn mergeTypes(wasm: *Wasm, gpa: Allocator) !void {
     log.debug("Merging types", .{});
-    for (self.resolved_symbols.keys()) |sym_with_loc| {
-        const object = self.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
+    for (wasm.resolved_symbols.keys()) |sym_with_loc| {
+        const object = wasm.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
         if (symbol.tag == .function) {
             if (symbol.isUndefined()) {
                 log.debug("Adding type from extern function '{s}'", .{symbol.name});
-                const value = &self.imports.imported_functions.values()[symbol.index];
-                value.type = try self.types.append(gpa, object.types[value.type]);
+                const value = &wasm.imports.imported_functions.values()[symbol.index];
+                value.type = try wasm.types.append(gpa, object.types[value.type]);
                 continue;
             }
             log.debug("Adding type from function '{s}'", .{symbol.name});
-            const func = &self.functions.items.items[symbol.index - self.imports.functionCount()];
-            func.type_index = try self.types.append(gpa, object.types[func.type_index]);
+            const func = &wasm.functions.items.items[symbol.index - wasm.imports.functionCount()];
+            func.type_index = try wasm.types.append(gpa, object.types[func.type_index]);
         }
     }
-    log.debug("Completed building types. Total count: ({d})", .{self.types.count()});
+    log.debug("Completed building types. Total count: ({d})", .{wasm.types.count()});
 }
 
-fn setupExports(self: *Wasm, gpa: Allocator) !void {
+fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
     log.debug("Building exports from symbols", .{});
 
     // When importing memory option is false,
     // we export the memory.
-    if (!self.options.import_memory) {
-        try self.exports.append(gpa, .{ .name = "memory", .kind = .memory, .index = 0 });
+    if (!wasm.options.import_memory) {
+        try wasm.exports.append(gpa, .{ .name = "memory", .kind = .memory, .index = 0 });
     }
 
-    var symbol_it = SymbolIterator.init(self);
+    var symbol_it = SymbolIterator.init(wasm);
     while (symbol_it.next()) |entry| {
         const symbol = entry.symbol;
         if (!symbol.isExported()) continue;
@@ -369,14 +438,14 @@ fn setupExports(self: *Wasm, gpa: Allocator) !void {
         log.debug("Appending export from symbol '{s}' using name: '{s}' index: {d}", .{
             symbol.name, name, symbol.index,
         });
-        try self.exports.append(gpa, exported);
-        try self.exports.appendSymbol(gpa, entry.symbol);
+        try wasm.exports.append(gpa, exported);
+        try wasm.exports.appendSymbol(gpa, entry.symbol);
     }
-    log.debug("Completed building exports. Total count: ({d})", .{self.exports.count()});
+    log.debug("Completed building exports. Total count: ({d})", .{wasm.exports.count()});
 }
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
-fn setupLinkerSymbols(self: *Wasm, gpa: Allocator) !void {
+fn setupLinkerSymbols(wasm: *Wasm, gpa: Allocator) !void {
     var symbol: Symbol = .{
         .flags = 0,
         .name = "__stack_pointer",
@@ -389,13 +458,13 @@ fn setupLinkerSymbols(self: *Wasm, gpa: Allocator) !void {
         .global_type = .{ .valtype = .i32, .mutable = true },
     };
 
-    symbol.index = try self.globals.append(gpa, 0, global);
+    symbol.index = try wasm.globals.append(gpa, 0, global);
 
-    const sym_index = @intCast(u32, self.synthetic_symbols.count());
+    const sym_index = @intCast(u32, wasm.synthetic_symbols.count());
     const loc: SymbolWithLoc = .{ .sym_index = sym_index, .file = null };
-    try self.synthetic_symbols.putNoClobber(gpa, symbol.name, symbol);
-    try self.resolved_symbols.putNoClobber(gpa, loc, {});
-    try self.global_symbols.putNoClobber(gpa, symbol.name, loc);
+    try wasm.synthetic_symbols.putNoClobber(gpa, symbol.name, symbol);
+    try wasm.resolved_symbols.putNoClobber(gpa, loc, {});
+    try wasm.global_symbols.putNoClobber(gpa, symbol.name, loc);
 }
 
 const SymbolIterator = struct {
@@ -413,37 +482,37 @@ const SymbolIterator = struct {
         return .{ .symbol_index = 0, .file_index = 0, .wasm = wasm_bin };
     }
 
-    fn next(self: *SymbolIterator) ?Entry {
-        if (self.file_index >= self.wasm.objects.items.len) return null;
-        const object: *Object = &self.wasm.objects.items[self.file_index];
-        if (self.symbol_index >= object.symtable.len) {
-            self.file_index += 1;
-            self.symbol_index = 0;
-            return self.next();
+    fn next(wasm: *SymbolIterator) ?Entry {
+        if (wasm.file_index >= wasm.wasm.objects.items.len) return null;
+        const object: *Object = &wasm.wasm.objects.items[wasm.file_index];
+        if (wasm.symbol_index >= object.symtable.len) {
+            wasm.file_index += 1;
+            wasm.symbol_index = 0;
+            return wasm.next();
         }
 
-        const symbol = &object.symtable[self.symbol_index];
-        defer self.symbol_index += 1;
+        const symbol = &object.symtable[wasm.symbol_index];
+        defer wasm.symbol_index += 1;
         return Entry{
-            .sym_index = self.symbol_index,
-            .file_index = self.file_index,
+            .sym_index = wasm.symbol_index,
+            .file_index = wasm.file_index,
             .symbol = symbol,
         };
     }
 };
 
-fn mergeImports(self: *Wasm, gpa: Allocator) !void {
-    const maybe_func_table = self.global_symbols.get("__indirect_function_table");
-    if (self.options.import_table) {
+fn mergeImports(wasm: *Wasm, gpa: Allocator) !void {
+    const maybe_func_table = wasm.global_symbols.get("__indirect_function_table");
+    if (wasm.options.import_table) {
         const sym_with_loc = maybe_func_table orelse {
             log.err("Required import __indirect_function_table is missing from object files", .{});
             return error.MissingSymbol;
         };
-        try self.imports.appendSymbol(gpa, self, sym_with_loc);
+        try wasm.imports.appendSymbol(gpa, wasm, sym_with_loc);
     }
 
-    for (self.resolved_symbols.keys()) |sym_with_loc| {
-        const symbol = sym_with_loc.getSymbol(self);
+    for (wasm.resolved_symbols.keys()) |sym_with_loc| {
+        const symbol = sym_with_loc.getSymbol(wasm);
         if (symbol.tag != .data) {
             if (!symbol.requiresImport()) {
                 continue;
@@ -452,38 +521,38 @@ fn mergeImports(self: *Wasm, gpa: Allocator) !void {
                 continue;
             }
             log.debug("Symbol '{s}' will be imported", .{symbol.name});
-            try self.imports.appendSymbol(gpa, self, sym_with_loc);
+            try wasm.imports.appendSymbol(gpa, wasm, sym_with_loc);
         }
     }
 }
 
 /// Sets up the memory section of the wasm module, as well as the stack.
-fn setupMemory(self: *Wasm) !void {
+fn setupMemory(wasm: *Wasm) !void {
     log.debug("Setting up memory layout", .{});
     const page_size = 64 * 1024;
-    const stack_size = self.options.stack_size orelse page_size * 1;
+    const stack_size = wasm.options.stack_size orelse page_size * 1;
     const stack_alignment = 16;
-    const stack_first = self.options.stack_first;
+    const stack_first = wasm.options.stack_first;
 
     var memory_ptr: u32 = 0;
-    if (!stack_first and self.options.global_base != null) {
-        memory_ptr = self.options.global_base.?;
+    if (!stack_first and wasm.options.global_base != null) {
+        memory_ptr = wasm.options.global_base.?;
     }
 
     if (stack_first) {
         memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
         // set stack value on global
-        if (self.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
-            const global: *std.wasm.Global = &self.globals.items.items[stack_pointer.index];
+        if (wasm.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
+            const global: *std.wasm.Global = &wasm.globals.items.items[stack_pointer.index];
             global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
         }
     }
 
     var offset: u32 = memory_ptr;
-    for (self.segments.items) |*segment, i| {
+    for (wasm.segments.items) |*segment, i| {
         // skip 'code' segments
-        if (self.code_section_index) |index| {
+        if (wasm.code_section_index) |index| {
             if (index == i) continue;
         }
         memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, segment.alignment);
@@ -496,15 +565,15 @@ fn setupMemory(self: *Wasm) !void {
         memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
         // set stack value on global
-        if (self.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
-            const global: *std.wasm.Global = &self.globals.items.items[stack_pointer.index];
+        if (wasm.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
+            const global: *std.wasm.Global = &wasm.globals.items.items[stack_pointer.index];
             global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
         }
     }
 
     // Setup the max amount of pages
     const max_memory_allowed: u32 = (1 << 32) - 1;
-    if (self.options.initial_memory) |initial_memory| {
+    if (wasm.options.initial_memory) |initial_memory| {
         if (!std.mem.isAligned(initial_memory, page_size)) {
             log.err("Initial memory must be {d}-byte aligned", .{page_size});
             return error.MissAlignment;
@@ -522,10 +591,10 @@ fn setupMemory(self: *Wasm) !void {
 
     // In case we do not import memory, but define it ourselves,
     // set the minimum amount of pages on the memory section.
-    self.memories.limits.min = std.mem.alignForwardGeneric(u32, memory_ptr, page_size) / page_size;
-    log.debug("Total memory pages: {d}", .{self.memories.limits.min});
+    wasm.memories.limits.min = std.mem.alignForwardGeneric(u32, memory_ptr, page_size) / page_size;
+    log.debug("Total memory pages: {d}", .{wasm.memories.limits.min});
 
-    if (self.options.max_memory) |max_memory| {
+    if (wasm.options.max_memory) |max_memory| {
         if (!std.mem.isAligned(max_memory, page_size)) {
             log.err("Maximum memory must be {d}-byte aligned", .{page_size});
             return error.MissAlignment;
@@ -538,30 +607,30 @@ fn setupMemory(self: *Wasm) !void {
             log.err("Maximum memory exceeds maxmium amount {d}", .{max_memory_allowed});
             return error.MemoryTooBig;
         }
-        self.memories.limits.max = max_memory / page_size;
-        log.debug("Maximum memory pages: {d}", .{self.memories.limits.max});
+        wasm.memories.limits.max = max_memory / page_size;
+        log.debug("Maximum memory pages: {d}", .{wasm.memories.limits.max});
     }
 }
 
 /// From a given object's index and the index of the segment, returns the corresponding
 /// index of the segment within the final data section. When the segment does not yet
 /// exist, a new one will be initialized and appended. The new index will be returned in that case.
-pub fn getMatchingSegment(self: *Wasm, gpa: Allocator, object_index: u16, relocatable_index: u32) !u32 {
-    const object: Object = self.objects.items[object_index];
+pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, relocatable_index: u32) !u32 {
+    const object: Object = wasm.objects.items[object_index];
     const relocatable_data = object.relocatable_data[relocatable_index];
-    const index = @intCast(u32, self.segments.items.len);
+    const index = @intCast(u32, wasm.segments.items.len);
 
     switch (relocatable_data.type) {
         .data => {
             const segment_info = object.segment_info[relocatable_data.index];
-            const segment_name = if (self.options.merge_data_segments)
+            const segment_name = if (wasm.options.merge_data_segments)
                 segment_info.outputName()
             else
                 segment_info.name;
-            const result = try self.data_segments.getOrPut(gpa, segment_name);
+            const result = try wasm.data_segments.getOrPut(gpa, segment_name);
             if (!result.found_existing) {
                 result.value_ptr.* = index;
-                try self.segments.append(gpa, .{
+                try wasm.segments.append(gpa, .{
                     .alignment = 1,
                     .size = 0,
                     .offset = 0,
@@ -569,9 +638,9 @@ pub fn getMatchingSegment(self: *Wasm, gpa: Allocator, object_index: u16, reloca
                 return index;
             } else return result.value_ptr.*;
         },
-        .code => return self.code_section_index orelse blk: {
-            self.code_section_index = index;
-            try self.segments.append(gpa, .{
+        .code => return wasm.code_section_index orelse blk: {
+            wasm.code_section_index = index;
+            try wasm.segments.append(gpa, .{
                 .alignment = 1,
                 .size = 0,
                 .offset = 0,
@@ -582,11 +651,11 @@ pub fn getMatchingSegment(self: *Wasm, gpa: Allocator, object_index: u16, reloca
     }
 }
 
-fn allocateAtoms(self: *Wasm) !void {
-    var it = self.atoms.iterator();
+fn allocateAtoms(wasm: *Wasm) !void {
+    var it = wasm.atoms.iterator();
     while (it.next()) |entry| {
         const segment_index = entry.key_ptr.*;
-        const segment: *Segment = &self.segments.items[segment_index];
+        const segment: *Segment = &wasm.segments.items[segment_index];
         var atom: *Atom = entry.value_ptr.*.getFirst();
 
         log.debug("Allocating atoms for segment '{d}'", .{segment_index});
@@ -595,7 +664,7 @@ fn allocateAtoms(self: *Wasm) !void {
         while (true) {
             offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
             atom.offset = offset;
-            const object: *Object = &self.objects.items[atom.file];
+            const object: *Object = &wasm.objects.items[atom.file];
             const symbol = &object.symtable[atom.sym_index];
 
             log.debug("Atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8} size={d}", .{
@@ -613,27 +682,27 @@ fn allocateAtoms(self: *Wasm) !void {
     }
 }
 
-fn relocateAtoms(self: *Wasm) !void {
-    var it = self.atoms.valueIterator();
+fn relocateAtoms(wasm: *Wasm) !void {
+    var it = wasm.atoms.valueIterator();
     while (it.next()) |next_atom| {
         var atom: *Atom = next_atom.*.getFirst();
         while (true) {
             // First perform relocations to rewrite the binary data
-            try atom.resolveRelocs(self);
+            try atom.resolveRelocs(wasm);
             atom = atom.next orelse break;
         }
     }
 }
 
-fn setupStart(self: *Wasm) !void {
-    if (self.options.no_entry) return;
-    const entry_name = self.options.entry_name orelse "_start";
+fn setupStart(wasm: *Wasm) !void {
+    if (wasm.options.no_entry) return;
+    const entry_name = wasm.options.entry_name orelse "_start";
 
-    const symbol_with_loc: SymbolWithLoc = self.global_symbols.get(entry_name) orelse {
+    const symbol_with_loc: SymbolWithLoc = wasm.global_symbols.get(entry_name) orelse {
         log.err("Entry symbol '{s}' does not exist, use '--no-entry' to suppress", .{entry_name});
         return error.MissingSymbol;
     };
-    const symbol = symbol_with_loc.getSymbol(self);
+    const symbol = symbol_with_loc.getSymbol(wasm);
     if (symbol.tag != .function) {
         log.err("Entry symbol '{s}' is not a function", .{entry_name});
         return error.InvalidEntryKind;

@@ -170,7 +170,7 @@ pub fn main() !void {
     });
     defer wasm_bin.deinit(gpa);
 
-    try wasm_bin.addObjects(gpa, positionals.items);
+    try wasm_bin.parseInputFiles(gpa, positionals.items);
     try wasm_bin.flush(gpa);
 }
 
