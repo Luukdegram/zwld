@@ -33,6 +33,17 @@ next: ?*Atom,
 /// is null when this atom is the first in its order
 prev: ?*Atom,
 
+/// Represents a default empty wasm `Atom`
+pub const empty: Atom = .{
+    .alignment = 0,
+    .file = 0,
+    .next = null,
+    .offset = 0,
+    .prev = null,
+    .size = 0,
+    .sym_index = 0,
+};
+
 /// Creates a new Atom with default fields
 pub fn create(gpa: Allocator) !*Atom {
     const atom = try gpa.create(Atom);
@@ -89,15 +100,15 @@ pub fn resolveRelocs(self: *Atom, wasm_bin: *const Wasm) !void {
     const symbol: Symbol = object.symtable[self.sym_index];
 
     log.debug("Resolving relocs in atom '{s}' count({d})", .{
-        symbol.name,
+        object.string_table.get(symbol.name),
         self.relocs.items.len,
     });
 
     for (self.relocs.items) |reloc| {
         const value = self.relocationValue(reloc, wasm_bin);
         log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} value={d}", .{
-            object.symtable[reloc.index].name,
-            symbol.name,
+            object.string_table.get(object.symtable[reloc.index].name),
+            object.string_table.get(symbol.name),
             reloc.offset,
             value,
         });
@@ -161,7 +172,7 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
                 return 0;
             }
             std.debug.assert(symbol.tag == .data);
-            const segment_name = object.segment_info[symbol.index].outputName();
+            const segment_name = object.segment_info[symbol.index].outputName(wasm_bin.options.merge_data_segments);
             const atom_index = wasm_bin.data_segments.get(segment_name).?;
             var target_atom = wasm_bin.atoms.getPtr(atom_index).?.*.getFirst();
             while (true) {
@@ -171,13 +182,13 @@ fn relocationValue(self: *Atom, relocation: types.Relocation, wasm_bin: *const W
                 target_atom = target_atom.next orelse return 0;
             }
             const segment = wasm_bin.segments.items[atom_index];
-            const offset = target_atom.offset + segment.offset;
-            return offset + (relocation.addend orelse 0);
+            const offset = @intCast(i32, target_atom.offset + segment.offset);
+            return @intCast(u32, offset + relocation.addend);
         },
         .R_WASM_EVENT_INDEX_LEB => return symbol.index,
         .R_WASM_SECTION_OFFSET_I32,
         .R_WASM_FUNCTION_OFFSET_I32,
-        => return relocation.offset,
+        => return std.debug.panic("TODO", .{}),
     }
 }
 

@@ -12,6 +12,8 @@ const sections = @import("sections.zig");
 const leb = std.leb;
 const fs = std.fs;
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
+const mem = std.mem;
 
 const log = std.log.scoped(.zwld);
 
@@ -19,6 +21,8 @@ const log = std.log.scoped(.zwld);
 file: fs.File,
 /// Configuration of the linker provided by the user
 options: Options,
+/// Output path of the binary
+name: []const u8,
 /// A list with references to objects we link to during `flush()`
 objects: std.ArrayListUnmanaged(Object) = .{},
 /// A list of archive files which are lazily linked with the final binary.
@@ -26,7 +30,7 @@ objects: std.ArrayListUnmanaged(Object) = .{},
 /// file to be linked into the final binary.
 archives: std.ArrayListUnmanaged(Archive) = .{},
 /// A map of global names to their symbol location in an object file
-global_symbols: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+global_symbols: std.AutoHashMapUnmanaged(u32, SymbolWithLoc) = .{},
 /// Contains all atoms that have been created, used to clean up
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// Maps atoms to their segment index
@@ -40,6 +44,11 @@ resolved_symbols: std.AutoArrayHashMapUnmanaged(SymbolWithLoc, void) = .{},
 /// Maps discarded symbols and their positions to the location of the symbol
 /// it was resolved to.
 discarded: std.AutoHashMapUnmanaged(SymbolWithLoc, SymbolWithLoc) = .{},
+/// Symbols that remain undefined after symbol resolution.
+undefs: std.StringArrayHashMapUnmanaged(SymbolWithLoc) = .{},
+
+/// String table, used to deduplicate all symbol names
+string_table: StringTable = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
@@ -95,6 +104,18 @@ pub const SymbolWithLoc = struct {
         }
         return &wasm.synthetic_symbols.values()[loc.sym_index];
     }
+
+    /// From a given location, returns the name of the symbol.
+    pub fn getName(loc: SymbolWithLoc, wasm_bin: *const Wasm) []const u8 {
+        if (wasm_bin.discarded.get(loc)) |new_loc| {
+            return new_loc.getName(wasm_bin);
+        }
+        if (loc.file) |object_index| {
+            const object: Object = wasm_bin.objects.items[object_index];
+            return object.string_table.get(object.symtable[loc.sym_index].name);
+        }
+        return wasm_bin.string_table.get(wasm_bin.synthetic_symbols.values()[loc.sym_index].name);
+    }
 };
 
 /// Options to pass to our linker which affects
@@ -135,15 +156,17 @@ pub fn openPath(path: []const u8, options: Options) !Wasm {
     });
     errdefer file.close();
 
-    return Wasm{ .file = file, .options = options };
+    return Wasm{ .file = file, .options = options, .name = path };
 }
 
 /// Releases any resources that is owned by `Wasm`,
 /// usage after calling deinit is illegal behaviour.
 pub fn deinit(wasm: *Wasm, gpa: Allocator) void {
     for (wasm.objects.items) |*object| {
-        object.file.?.close();
         object.deinit(gpa);
+    }
+    for (wasm.archives.items) |*archive| {
+        archive.deinit(gpa);
     }
     for (wasm.managed_atoms.items) |atom| {
         atom.deinit(gpa);
@@ -181,9 +204,9 @@ pub fn parseInputFiles(wasm: *Wasm, gpa: Allocator, files: []const []const u8) !
 fn parseObjectFile(wasm: *Wasm, gpa: Allocator, path: []const u8) !bool {
     const file = try fs.cwd().openFile(path, .{});
     errdefer file.close();
-    var object = Object.create(gpa, file, path) catch |err| switch (err) {
+    var object = Object.create(gpa, file, path, null) catch |err| switch (err) {
         error.InvalidMagicByte, error.NotObjectFile => {
-            file.close();
+            // file.close();
             return false;
         },
         else => |e| return e,
@@ -275,73 +298,254 @@ pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
     try @import("emit_wasm.zig").emit(wasm, gpa);
 }
 
+/// Generic string table that duplicates strings
+/// and converts them into offsets instead.
+pub const StringTable = struct {
+    /// Table that maps string offsets, which is used to de-duplicate strings.
+    /// Rather than having the offset map to the data, the `StringContext` holds all bytes of the string.
+    /// The strings are stored as a contigious array where each string is zero-terminated.
+    string_table: std.HashMapUnmanaged(
+        u32,
+        void,
+        std.hash_map.StringIndexContext,
+        std.hash_map.default_max_load_percentage,
+    ) = .{},
+    /// Holds the actual data of the string table.
+    string_data: std.ArrayListUnmanaged(u8) = .{},
+
+    /// Accepts a string and searches for a corresponding string.
+    /// When found, de-duplicates the string and returns the existing offset instead.
+    /// When the string is not found in the `string_table`, a new entry will be inserted
+    /// and the new offset to its data will be returned.
+    pub fn put(table: *StringTable, allocator: Allocator, string: []const u8) !u32 {
+        const gop = try table.string_table.getOrPutContextAdapted(
+            allocator,
+            string,
+            std.hash_map.StringIndexAdapter{ .bytes = &table.string_data },
+            .{ .bytes = &table.string_data },
+        );
+        if (gop.found_existing) {
+            const off = gop.key_ptr.*;
+            log.debug("reusing string '{s}' at offset 0x{x}", .{ string, off });
+            return off;
+        }
+
+        try table.string_data.ensureUnusedCapacity(allocator, string.len + 1);
+        const offset = @intCast(u32, table.string_data.items.len);
+
+        log.debug("writing new string '{s}' at offset 0x{x}", .{ string, offset });
+
+        table.string_data.appendSliceAssumeCapacity(string);
+        table.string_data.appendAssumeCapacity(0);
+
+        gop.key_ptr.* = offset;
+
+        return offset;
+    }
+
+    /// From a given offset, returns its corresponding string value.
+    /// Asserts offset does not exceed bounds.
+    pub fn get(table: StringTable, off: u32) []const u8 {
+        assert(off < table.string_data.items.len);
+        return mem.sliceTo(@ptrCast([*:0]const u8, table.string_data.items.ptr + off), 0);
+    }
+
+    /// Returns the offset of a given string when it exists.
+    /// Will return null if the given string does not yet exist within the string table.
+    pub fn getOffset(table: *StringTable, string: []const u8) ?u32 {
+        return table.string_table.getKeyAdapted(
+            string,
+            std.hash_map.StringIndexAdapter{ .bytes = &table.string_data },
+        );
+    }
+
+    /// Frees all resources of the string table. Any references pointing
+    /// to the strings will be invalid.
+    pub fn deinit(table: *StringTable, allocator: Allocator) void {
+        table.string_data.deinit(allocator);
+        table.string_table.deinit(allocator);
+        table.* = undefined;
+    }
+};
+
 fn resolveSymbolsInObject(wasm: *Wasm, gpa: Allocator, object_index: u16) !void {
     const object: Object = wasm.objects.items[object_index];
+    log.debug("Resolving symbols in object: '{s}'", .{object.name});
 
-    log.debug("resolving symbols in {s}", .{object.name});
-
-    for (object.symtable) |*symbol, i| {
-        const sym_idx = @intCast(u32, i);
+    for (object.symtable) |symbol, i| {
+        const sym_index = @intCast(u32, i);
         const location: SymbolWithLoc = .{
             .file = object_index,
-            .sym_index = sym_idx,
+            .sym_index = sym_index,
         };
+        const sym_name = object.string_table.get(symbol.name);
+        if (mem.eql(u8, sym_name, "__indirect_function_table")) {
+            continue;
+        }
+        const sym_name_index = try wasm.string_table.put(gpa, sym_name);
 
         if (symbol.isLocal()) {
             if (symbol.isUndefined()) {
                 log.err("Local symbols are not allowed to reference imports", .{});
-                log.err("  symbol '{s}' defined in '{s}'", .{ symbol.name, object.name });
-                return error.undefinedLocal;
+                log.err("  symbol '{s}' defined in '{s}'", .{ sym_name, object.name });
+                return error.UndefinedLocal;
             }
             try wasm.resolved_symbols.putNoClobber(gpa, location, {});
             continue;
         }
 
-        // TODO: Store undefined symbols so we can verify at the end if they've all been found
-        // if not, emit an error (unless --allow-undefined is enabled).
-        const maybe_existing = try wasm.global_symbols.getOrPut(gpa, symbol.name);
+        const maybe_existing = try wasm.global_symbols.getOrPut(gpa, sym_name_index);
         if (!maybe_existing.found_existing) {
             maybe_existing.value_ptr.* = location;
             try wasm.resolved_symbols.putNoClobber(gpa, location, {});
+
+            if (symbol.isUndefined()) {
+                try wasm.undefs.putNoClobber(gpa, sym_name, location);
+            }
             continue;
         }
 
         const existing_loc = maybe_existing.value_ptr.*;
         const existing_sym: *Symbol = existing_loc.getSymbol(wasm);
 
-        if (!existing_sym.isUndefined()) {
-            if (!symbol.isUndefined()) {
-                log.info("Overwriting symbol '{s}'", .{symbol.name});
-                log.info("  first definition in '{s}'", .{wasm.objects.items[existing_loc.file.?].name});
-                log.info("  next definition in '{s}'", .{object.name});
+        const existing_file_path = if (existing_loc.file) |file| blk: {
+            break :blk wasm.objects.items[file].name;
+        } else wasm.name;
+
+        if (!existing_sym.isUndefined()) outer: {
+            if (!symbol.isUndefined()) inner: {
+                if (symbol.isWeak()) {
+                    break :inner; // ignore the new symbol (discard it)
+                }
+                if (existing_sym.isWeak()) {
+                    break :outer; // existing is weak, while new one isn't. Replace it.
+                }
+                // both are defined and weak, we have a symbol collision.
+                log.err("symbol '{s}' defined multiple times", .{sym_name});
+                log.err("  first definition in '{s}'", .{existing_file_path});
+                log.err("  next definition in '{s}'", .{object.name});
                 return error.SymbolCollision;
             }
 
+            try wasm.discarded.put(gpa, location, existing_loc);
             continue; // Do not overwrite defined symbols with undefined symbols
+        }
+
+        if (symbol.tag != existing_sym.tag) {
+            log.err("symbol '{s}' mismatching type '{s}", .{ sym_name, @tagName(symbol.tag) });
+            log.err("  first definition in '{s}'", .{existing_file_path});
+            log.err("  next definition in '{s}'", .{object.name});
+            return error.SymbolMismatchingType;
+        }
+
+        if (existing_sym.isUndefined() and symbol.isUndefined()) {
+            const file_index = existing_loc.file.?;
+            const obj = wasm.objects.items[file_index];
+            const name_index = obj.findImport(symbol.tag.externalType(), existing_sym.index).module_name;
+            const existing_name = obj.string_table.get(name_index);
+
+            const module_index = object.findImport(symbol.tag.externalType(), symbol.index).module_name;
+            const module_name = object.string_table.get(module_index);
+            if (!mem.eql(u8, existing_name, module_name)) {
+                log.err("symbol '{s}' module name mismatch. Expected '{s}', but found '{s}'", .{
+                    sym_name,
+                    existing_name,
+                    module_name,
+                });
+                log.err("  first definition in '{s}'", .{existing_file_path});
+                log.err("  next definition in '{s}'", .{object.name});
+                return error.ModuleNameMismatch;
+            }
+        }
+
+        if (existing_sym.tag == .global) {
+            const existing_ty = wasm.getGlobalType(existing_loc);
+            const new_ty = wasm.getGlobalType(location);
+            if (existing_ty.mutable != new_ty.mutable or existing_ty.valtype != new_ty.valtype) {
+                log.err("symbol '{s}' mismatching global types", .{sym_name});
+                log.err("  first definition in '{s}'", .{existing_file_path});
+                log.err("  next definition in '{s}'", .{object.name});
+                return error.GlobalTypeMismatch;
+            }
+        }
+
+        if (existing_sym.tag == .function) {
+            const existing_ty = wasm.getFunctionSignature(existing_loc);
+            const new_ty = wasm.getFunctionSignature(location);
+            if (!existing_ty.eql(new_ty)) {
+                log.err("symbol '{s}' mismatching function signatures.", .{sym_name});
+                log.err("  expected signature {}, but found signature {}", .{ existing_ty, new_ty });
+                log.err("  first definition in '{s}'", .{existing_file_path});
+                log.err("  next definition in '{s}'", .{object.name});
+                return error.FunctionSignatureMismatch;
+            }
         }
 
         // when both symbols are weak, we skip overwriting
         if (existing_sym.isWeak() and symbol.isWeak()) {
+            try wasm.discarded.put(gpa, location, existing_loc);
             continue;
         }
 
         // simply overwrite with the new symbol
-        log.debug("Overwriting symbol '{s}'", .{symbol.name});
-        log.debug("  old definition in '{s}'", .{wasm.objects.items[existing_loc.file.?].name});
+        log.debug("Overwriting symbol '{s}'", .{sym_name});
+        log.debug("  old definition in '{s}'", .{existing_file_path});
         log.debug("  new definition in '{s}'", .{object.name});
-        try wasm.discarded.putNoClobber(gpa, maybe_existing.value_ptr.*, location);
+        try wasm.discarded.putNoClobber(gpa, existing_loc, location);
         maybe_existing.value_ptr.* = location;
-        try wasm.global_symbols.put(gpa, symbol.name, location);
+        try wasm.global_symbols.put(gpa, sym_name_index, location);
         try wasm.resolved_symbols.put(gpa, location, {});
-        std.debug.assert(wasm.resolved_symbols.swapRemove(existing_loc));
+        assert(wasm.resolved_symbols.swapRemove(existing_loc));
+        if (existing_sym.isUndefined()) {
+            assert(wasm.undefs.swapRemove(sym_name));
+        }
     }
+}
+
+/// From a given symbol location, returns its `wasm.GlobalType`.
+/// Asserts the Symbol represents a global.
+fn getGlobalType(wasm: *const Wasm, loc: SymbolWithLoc) std.wasm.GlobalType {
+    const symbol = loc.getSymbol(wasm);
+    assert(symbol.tag == .global);
+    const is_undefined = symbol.isUndefined();
+    if (loc.file) |file_index| {
+        const obj: Object = wasm.objects.items[file_index];
+        if (is_undefined) {
+            return obj.findImport(.global, symbol.index).kind.global;
+        }
+        const import_global_count = obj.importedCountByKind(.global);
+        return obj.globals[symbol.index - import_global_count].global_type;
+    }
+    assert(!is_undefined);
+    return wasm.globals.items.items[symbol.index].global_type;
+}
+
+/// From a given symbol location, returns its `wasm.Type`.
+/// Asserts the Symbol represents a function.
+fn getFunctionSignature(wasm: *const Wasm, loc: SymbolWithLoc) std.wasm.Type {
+    const symbol = loc.getSymbol(wasm);
+    assert(symbol.tag == .function);
+    const is_undefined = symbol.isUndefined();
+    if (loc.file) |file_index| {
+        const obj: Object = wasm.objects.items[file_index];
+        if (is_undefined) {
+            const ty_index = obj.findImport(.function, symbol.index).kind.function;
+            return obj.func_types[ty_index];
+        }
+        const import_function_count = obj.importedCountByKind(.function);
+        const type_index = obj.functions[symbol.index - import_function_count].type_index;
+        return obj.func_types[type_index];
+    }
+    assert(!is_undefined);
+    return wasm.types.get(wasm.functions.items.items[symbol.index].type_index).*;
 }
 
 /// Calculates the new indexes for symbols and their respective symbols
 fn mergeSections(wasm: *Wasm, gpa: Allocator) !void {
     // first append the indirect function table if initialized
-    if (wasm.global_symbols.get("__indirect_function_table")) |sym_with_loc| {
+    if (wasm.string_table.getOffset("__indirect_function_table")) |offset| {
         log.debug("Appending indirect function table", .{});
+        const sym_with_loc = wasm.global_symbols.get(offset).?;
         const object: Object = wasm.objects.items[sym_with_loc.file.?];
         const symbol = sym_with_loc.getSymbol(wasm);
         const imp = object.findImport(.table, object.symtable[sym_with_loc.sym_index].index);
@@ -396,14 +600,14 @@ fn mergeTypes(wasm: *Wasm, gpa: Allocator) !void {
         const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
         if (symbol.tag == .function) {
             if (symbol.isUndefined()) {
-                log.debug("Adding type from extern function '{s}'", .{symbol.name});
+                log.debug("Adding type from extern function '{s}'", .{object.string_table.get(symbol.name)});
                 const value = &wasm.imports.imported_functions.values()[symbol.index];
-                value.type = try wasm.types.append(gpa, object.types[value.type]);
+                value.type = try wasm.types.append(gpa, object.func_types[value.type]);
                 continue;
             }
-            log.debug("Adding type from function '{s}'", .{symbol.name});
+            log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
             const func = &wasm.functions.items.items[symbol.index - wasm.imports.functionCount()];
-            func.type_index = try wasm.types.append(gpa, object.types[func.type_index]);
+            func.type_index = try wasm.types.append(gpa, object.func_types[func.type_index]);
         }
     }
     log.debug("Completed building types. Total count: ({d})", .{wasm.types.count()});
@@ -423,7 +627,7 @@ fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
         const symbol = entry.symbol;
         if (!symbol.isExported()) continue;
 
-        var name: []const u8 = symbol.name;
+        const name: []const u8 = wasm.string_table.get(symbol.name);
         var exported: std.wasm.Export = undefined;
         if (symbol.tag == .function) {
             exported = .{ .name = name, .kind = .function, .index = symbol.index };
@@ -436,7 +640,7 @@ fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
         }
 
         log.debug("Appending export from symbol '{s}' using name: '{s}' index: {d}", .{
-            symbol.name, name, symbol.index,
+            wasm.string_table.get(symbol.name), name, symbol.index,
         });
         try wasm.exports.append(gpa, exported);
         try wasm.exports.appendSymbol(gpa, entry.symbol);
@@ -446,9 +650,10 @@ fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
 
 /// Creates symbols that are made by the linker, rather than the compiler/object file
 fn setupLinkerSymbols(wasm: *Wasm, gpa: Allocator) !void {
+    const name_offset = try wasm.string_table.put(gpa, "__stack_pointer");
     var symbol: Symbol = .{
         .flags = 0,
-        .name = "__stack_pointer",
+        .name = name_offset,
         .tag = .global,
         .index = 0,
     };
@@ -462,9 +667,9 @@ fn setupLinkerSymbols(wasm: *Wasm, gpa: Allocator) !void {
 
     const sym_index = @intCast(u32, wasm.synthetic_symbols.count());
     const loc: SymbolWithLoc = .{ .sym_index = sym_index, .file = null };
-    try wasm.synthetic_symbols.putNoClobber(gpa, symbol.name, symbol);
+    try wasm.synthetic_symbols.putNoClobber(gpa, wasm.string_table.get(name_offset), symbol);
     try wasm.resolved_symbols.putNoClobber(gpa, loc, {});
-    try wasm.global_symbols.putNoClobber(gpa, symbol.name, loc);
+    try wasm.global_symbols.putNoClobber(gpa, name_offset, loc);
 }
 
 const SymbolIterator = struct {
@@ -482,32 +687,33 @@ const SymbolIterator = struct {
         return .{ .symbol_index = 0, .file_index = 0, .wasm = wasm_bin };
     }
 
-    fn next(wasm: *SymbolIterator) ?Entry {
-        if (wasm.file_index >= wasm.wasm.objects.items.len) return null;
-        const object: *Object = &wasm.wasm.objects.items[wasm.file_index];
-        if (wasm.symbol_index >= object.symtable.len) {
-            wasm.file_index += 1;
-            wasm.symbol_index = 0;
-            return wasm.next();
+    fn next(iterator: *SymbolIterator) ?Entry {
+        if (iterator.file_index >= iterator.wasm.objects.items.len) return null;
+        const object: *Object = &iterator.wasm.objects.items[iterator.file_index];
+        if (iterator.symbol_index >= object.symtable.len) {
+            iterator.file_index += 1;
+            iterator.symbol_index = 0;
+            return iterator.next();
         }
 
-        const symbol = &object.symtable[wasm.symbol_index];
-        defer wasm.symbol_index += 1;
+        const symbol = &object.symtable[iterator.symbol_index];
+        defer iterator.symbol_index += 1;
         return Entry{
-            .sym_index = wasm.symbol_index,
-            .file_index = wasm.file_index,
+            .sym_index = iterator.symbol_index,
+            .file_index = iterator.file_index,
             .symbol = symbol,
         };
     }
 };
 
 fn mergeImports(wasm: *Wasm, gpa: Allocator) !void {
-    const maybe_func_table = wasm.global_symbols.get("__indirect_function_table");
+    const maybe_func_table_offset = wasm.string_table.getOffset("__indirect_function_table");
     if (wasm.options.import_table) {
-        const sym_with_loc = maybe_func_table orelse {
+        const table_offset = maybe_func_table_offset orelse {
             log.err("Required import __indirect_function_table is missing from object files", .{});
             return error.MissingSymbol;
         };
+        const sym_with_loc = wasm.global_symbols.get(table_offset).?;
         try wasm.imports.appendSymbol(gpa, wasm, sym_with_loc);
     }
 
@@ -517,10 +723,10 @@ fn mergeImports(wasm: *Wasm, gpa: Allocator) !void {
             if (!symbol.requiresImport()) {
                 continue;
             }
-            if (std.mem.eql(u8, symbol.name, "__indirect_function_table")) {
+            if (std.mem.eql(u8, sym_with_loc.getName(wasm), "__indirect_function_table")) {
                 continue;
             }
-            log.debug("Symbol '{s}' will be imported", .{symbol.name});
+            log.debug("Symbol '{s}' will be imported", .{sym_with_loc.getName(wasm)});
             try wasm.imports.appendSymbol(gpa, wasm, sym_with_loc);
         }
     }
@@ -608,14 +814,14 @@ fn setupMemory(wasm: *Wasm) !void {
             return error.MemoryTooBig;
         }
         wasm.memories.limits.max = max_memory / page_size;
-        log.debug("Maximum memory pages: {d}", .{wasm.memories.limits.max});
+        log.debug("Maximum memory pages: {?d}", .{wasm.memories.limits.max});
     }
 }
 
 /// From a given object's index and the index of the segment, returns the corresponding
 /// index of the segment within the final data section. When the segment does not yet
 /// exist, a new one will be initialized and appended. The new index will be returned in that case.
-pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, relocatable_index: u32) !u32 {
+pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, relocatable_index: u32) !?u32 {
     const object: Object = wasm.objects.items[object_index];
     const relocatable_data = object.relocatable_data[relocatable_index];
     const index = @intCast(u32, wasm.segments.items.len);
@@ -623,10 +829,7 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, reloca
     switch (relocatable_data.type) {
         .data => {
             const segment_info = object.segment_info[relocatable_data.index];
-            const segment_name = if (wasm.options.merge_data_segments)
-                segment_info.outputName()
-            else
-                segment_info.name;
+            const segment_name = segment_info.outputName(wasm.options.merge_data_segments);
             const result = try wasm.data_segments.getOrPut(gpa, segment_name);
             if (!result.found_existing) {
                 result.value_ptr.* = index;
@@ -647,7 +850,19 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, reloca
             });
             break :blk index;
         },
-        .custom => @panic("TODO: Custom section relocation"),
+        .debug => return null,
+    }
+}
+
+/// From a given index, append the given `Atom` at the back of the linked list.
+/// Simply inserts it into the map of atoms when it doesn't exist yet.
+pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom: *Atom) !void {
+    if (wasm.atoms.getPtr(index)) |last| {
+        last.*.next = atom;
+        atom.prev = last.*;
+        last.* = atom;
+    } else {
+        try wasm.atoms.putNoClobber(gpa, index, atom);
     }
 }
 
@@ -668,7 +883,7 @@ fn allocateAtoms(wasm: *Wasm) !void {
             const symbol = &object.symtable[atom.sym_index];
 
             log.debug("Atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8} size={d}", .{
-                symbol.name,
+                object.string_table.get(symbol.name),
                 offset,
                 offset + atom.size,
                 atom.size,
@@ -697,11 +912,12 @@ fn relocateAtoms(wasm: *Wasm) !void {
 fn setupStart(wasm: *Wasm) !void {
     if (wasm.options.no_entry) return;
     const entry_name = wasm.options.entry_name orelse "_start";
-
-    const symbol_with_loc: SymbolWithLoc = wasm.global_symbols.get(entry_name) orelse {
+    const entry_name_offset = wasm.string_table.getOffset(entry_name) orelse {
         log.err("Entry symbol '{s}' does not exist, use '--no-entry' to suppress", .{entry_name});
         return error.MissingSymbol;
     };
+
+    const symbol_with_loc: SymbolWithLoc = wasm.global_symbols.get(entry_name_offset).?;
     const symbol = symbol_with_loc.getSymbol(wasm);
     if (symbol.tag != .function) {
         log.err("Entry symbol '{s}' is not a function", .{entry_name});

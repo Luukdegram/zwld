@@ -115,9 +115,9 @@ pub const Imports = struct {
     ) !void {
         const object: *Object = &wasm.objects.items[sym_with_loc.file.?];
         const symbol = &object.symtable[sym_with_loc.sym_index];
-        const import = object.findImport(symbol.externalType(), symbol.index);
-        const module_name = import.module_name;
-        const import_name = symbol.name;
+        const import = object.findImport(symbol.tag.externalType(), symbol.index);
+        const module_name = object.string_table.get(import.module_name);
+        const import_name = object.string_table.get(symbol.name);
 
         switch (symbol.tag) {
             .function => {

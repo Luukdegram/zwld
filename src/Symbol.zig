@@ -1,5 +1,8 @@
-//! Wasm symbols describing its kind,
-//! name and its properties.
+//! Represents a wasm symbol. Containing all of its properties,
+//! as well as providing helper methods to determine its functionality
+//! and how it will/must be linked.
+//! The name of the symbol can be found by providing the offset, found
+//! on the `name` field, to a string table in the wasm binary or object file.
 const Symbol = @This();
 
 const std = @import("std");
@@ -8,13 +11,15 @@ const types = @import("types.zig");
 /// Bitfield containings flags for a symbol
 /// Can contain any of the flags defined in `Flag`
 flags: u32,
-/// Symbol name, when undefined this will be taken from the import.
-name: []const u8,
-/// Represents what type of symbol this represents.
-tag: Tag,
-/// This is `undefined` when the `tag` is `Data` and the symbol is undefined.
-/// Therefore accessing the index field in such cases is illegal behavior.
+/// Symbol name, when the symbol is undefined the name will be taken from the import.
+/// Note: This is an index into the string table.
+name: u32,
+/// Index into the list of objects based on set `tag`
+/// NOTE: This will be set to `undefined` when `tag` is `data`
+/// and the symbol is undefined.
 index: u32,
+/// Represents the kind of the symbol, such as a function or global.
+tag: Tag,
 
 pub const Tag = enum {
     function,
@@ -23,20 +28,20 @@ pub const Tag = enum {
     section,
     event,
     table,
-};
 
-/// From a given symbol kind, returns the `ExternalType`
-/// Asserts the given tag can be represented as an external type.
-pub fn externalType(self: Symbol) std.wasm.ExternalKind {
-    return switch (self.tag) {
-        .function => .function,
-        .global => .global,
-        .data => .memory,
-        .section => unreachable, // Not an external type
-        .event => unreachable, // Not an external type
-        .table => .table,
-    };
-}
+    /// From a given symbol tag, returns the `ExternalType`
+    /// Asserts the given tag can be represented as an external type.
+    pub fn externalType(tag: Tag) std.wasm.ExternalKind {
+        return switch (tag) {
+            .function => .function,
+            .global => .global,
+            .data => .memory,
+            .section => unreachable, // Not an external type
+            .event => unreachable, // Not an external type
+            .table => .table,
+        };
+    }
+};
 
 pub const Flag = enum(u32) {
     /// Indicates a weak symbol.
@@ -69,87 +74,99 @@ pub const Flag = enum(u32) {
 
 /// Verifies if the given symbol should be imported from the
 /// host environment or not
-pub fn requiresImport(self: Symbol) bool {
-    if (!self.isUndefined()) return false;
-    if (self.isWeak()) return false;
-    if (self.tag == .data) return false;
-    // if (self.isDefined() and self.isWeak()) return true; //TODO: Only when building shared lib
+pub fn requiresImport(symbol: Symbol) bool {
+    if (symbol.tag == .data) return false;
+    if (!symbol.isUndefined()) return false;
+    if (symbol.isWeak()) return false;
+    // if (symbol.isDefined() and symbol.isWeak()) return true; //TODO: Only when building shared lib
 
     return true;
 }
 
-pub fn hasFlag(self: Symbol, flag: Flag) bool {
-    return self.flags & @enumToInt(flag) != 0;
+pub fn hasFlag(symbol: Symbol, flag: Flag) bool {
+    return symbol.flags & @enumToInt(flag) != 0;
 }
 
-pub fn setFlag(self: *Symbol, flag: Flag) void {
-    self.flags |= @enumToInt(flag);
+pub fn setFlag(symbol: *Symbol, flag: Flag) void {
+    symbol.flags |= @enumToInt(flag);
 }
 
-pub fn isUndefined(self: Symbol) bool {
-    return self.flags & @enumToInt(Flag.WASM_SYM_UNDEFINED) != 0;
+pub fn isUndefined(symbol: Symbol) bool {
+    return symbol.flags & @enumToInt(Flag.WASM_SYM_UNDEFINED) != 0;
 }
 
-pub fn setUndefined(self: *Symbol, is_undefined: bool) void {
+pub fn setUndefined(symbol: *Symbol, is_undefined: bool) void {
     if (is_undefined) {
-        self.setFlag(.WASM_SYM_UNDEFINED);
+        symbol.setFlag(.WASM_SYM_UNDEFINED);
     } else {
-        self.flags &= ~@enumToInt(Flag.WASM_SYM_UNDEFINED);
+        symbol.flags &= ~@enumToInt(Flag.WASM_SYM_UNDEFINED);
     }
 }
 
-pub fn isDefined(self: Symbol) bool {
-    return !self.isUndefined();
+pub fn setGlobal(symbol: *Symbol, is_global: bool) void {
+    if (is_global) {
+        symbol.flags &= ~@enumToInt(Flag.WASM_SYM_BINDING_LOCAL);
+    } else {
+        symbol.setFlag(.WASM_SYM_BINDING_LOCAL);
+    }
 }
 
-pub fn isVisible(self: Symbol) bool {
-    return self.flags & @enumToInt(Flag.WASM_SYM_VISIBILITY_HIDDEN) == 0;
+pub fn isDefined(symbol: Symbol) bool {
+    return !symbol.isUndefined();
 }
 
-pub fn isLocal(self: Symbol) bool {
-    return self.flags & @enumToInt(Flag.WASM_SYM_BINDING_LOCAL) != 0;
+pub fn isVisible(symbol: Symbol) bool {
+    return symbol.flags & @enumToInt(Flag.WASM_SYM_VISIBILITY_HIDDEN) == 0;
 }
 
-pub fn isGlobal(self: Symbol) bool {
-    return self.flags & @enumToInt(Flag.WASM_SYM_BINDING_LOCAL) == 0;
+pub fn isLocal(symbol: Symbol) bool {
+    return symbol.flags & @enumToInt(Flag.WASM_SYM_BINDING_LOCAL) != 0;
 }
 
-pub fn isHidden(self: Symbol) bool {
-    return self.flags & @enumToInt(Flag.WASM_SYM_VISIBILITY_HIDDEN) != 0;
+pub fn isGlobal(symbol: Symbol) bool {
+    return symbol.flags & @enumToInt(Flag.WASM_SYM_BINDING_LOCAL) == 0;
 }
 
-pub fn isNoStrip(self: Symbol) bool {
-    return self.flags & @enumToInt(Flag.WASM_SYM_NO_STRIP) != 0;
+pub fn isHidden(symbol: Symbol) bool {
+    return symbol.flags & @enumToInt(Flag.WASM_SYM_VISIBILITY_HIDDEN) != 0;
 }
 
-pub fn isExported(self: Symbol) bool {
-    if (self.isUndefined() or self.isLocal()) return false;
-    if (self.isHidden()) return false;
+pub fn isNoStrip(symbol: Symbol) bool {
+    return symbol.flags & @enumToInt(Flag.WASM_SYM_NO_STRIP) != 0;
+}
+
+pub fn isExported(symbol: Symbol) bool {
+    if (symbol.isUndefined() or symbol.isLocal()) return false;
+    if (symbol.isHidden()) return false;
+    if (symbol.hasFlag(.WASM_SYM_EXPORTED)) return true;
+    if (symbol.hasFlag(.WASM_SYM_BINDING_WEAK)) return false;
     return true;
 }
 
-pub fn isWeak(self: Symbol) bool {
-    return self.flags & @enumToInt(Flag.WASM_SYM_BINDING_WEAK) != 0;
+pub fn isWeak(symbol: Symbol) bool {
+    return symbol.flags & @enumToInt(Flag.WASM_SYM_BINDING_WEAK) != 0;
 }
 
 /// Formats the symbol into human-readable text
-pub fn format(self: Symbol, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+pub fn format(symbol: Symbol, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
     _ = fmt;
     _ = options;
 
-    const kind_fmt: u8 = switch (self.kind) {
+    const kind_fmt: u8 = switch (symbol.tag) {
         .function => 'F',
         .data => 'D',
         .global => 'G',
         .section => 'S',
         .event => 'E',
         .table => 'T',
+        .dead => '-',
     };
-    const visible: []const u8 = if (self.isVisible()) "yes" else "no";
-    const binding: []const u8 = if (self.isLocal()) "local" else "global";
+    const visible: []const u8 = if (symbol.isVisible()) "yes" else "no";
+    const binding: []const u8 = if (symbol.isLocal()) "local" else "global";
+    const undef: []const u8 = if (symbol.isUndefined()) "undefined" else "";
 
     try writer.print(
-        "{c} binding={s} visible={s} id={d} name={s}",
-        .{ kind_fmt, binding, visible, self.index(), self.name },
+        "{c} binding={s} visible={s} id={d} name_offset={d} {s}",
+        .{ kind_fmt, binding, visible, symbol.index, symbol.name, undef },
     );
 }

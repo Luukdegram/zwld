@@ -188,8 +188,8 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
         try leb.writeULEB128(writer, @intCast(u32, "name".len));
         try writer.writeAll("name");
 
-        try emitNameSection(0x01, gpa, funcs.items, writer);
-        try emitNameSection(0x07, gpa, globals.items, writer);
+        try emitNameSection(wasm, 0x01, gpa, funcs.items, writer);
+        try emitNameSection(wasm, 0x07, gpa, globals.items, writer);
         try emitDataNamesSection(wasm, gpa, writer);
         try emitCustomHeader(file, offset);
     }
@@ -201,19 +201,20 @@ fn lessThan(context: void, lhs: *const Symbol, rhs: *const Symbol) bool {
     return lhs.index < rhs.index;
 }
 
-fn emitSymbol(symbol: *const Symbol, writer: anytype) !void {
+fn emitSymbol(wasm: *const Wasm, symbol: *const Symbol, writer: anytype) !void {
     try leb.writeULEB128(writer, symbol.index);
-    try leb.writeULEB128(writer, @intCast(u32, symbol.name.len));
-    try writer.writeAll(symbol.name);
+    const name = wasm.string_table.get(symbol.name);
+    try leb.writeULEB128(writer, @intCast(u32, name.len));
+    try writer.writeAll(name);
 }
 
-fn emitNameSection(name_type: u8, gpa: std.mem.Allocator, items: anytype, writer: anytype) !void {
+fn emitNameSection(wasm: *const Wasm, name_type: u8, gpa: std.mem.Allocator, items: []*const Symbol, writer: anytype) !void {
     var section_list = std.ArrayList(u8).init(gpa);
     defer section_list.deinit();
     const sec_writer = section_list.writer();
 
     try leb.writeULEB128(sec_writer, @intCast(u32, items.len));
-    for (items) |sym| try emitSymbol(sym, sec_writer);
+    for (items) |sym| try emitSymbol(wasm, sym, sec_writer);
     try leb.writeULEB128(writer, name_type);
     try leb.writeULEB128(writer, @intCast(u32, section_list.items.len));
     try writer.writeAll(section_list.items);
@@ -302,7 +303,7 @@ fn emitImportSymbol(wasm: *const Wasm, sym_loc: Wasm.SymbolWithLoc, writer: anyt
     const symbol = sym_loc.getSymbol(wasm).*;
     var import: std.wasm.Import = .{
         .module_name = undefined,
-        .name = symbol.name,
+        .name = sym_loc.getName(wasm),
         .kind = undefined,
     };
 
@@ -399,9 +400,10 @@ fn emitExport(exported: std.wasm.Export, writer: anytype) !void {
     try leb.writeULEB128(writer, exported.index);
 }
 
-fn emitElement(wasm: *const Wasm, writer: anytype) !void {
+fn emitElement(wasm: *Wasm, writer: anytype) !void {
     var flags: u32 = 0;
-    var index: ?u32 = if (wasm.global_symbols.get("__indirect_function_table")) |sym_loc| blk: {
+    var index: ?u32 = if (wasm.string_table.getOffset("__indirect_function_table")) |offset| blk: {
+        const sym_loc = wasm.global_symbols.get(offset).?;
         flags |= 0x2;
         break :blk sym_loc.getSymbol(wasm).index;
     } else null;
