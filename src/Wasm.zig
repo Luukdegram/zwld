@@ -180,6 +180,7 @@ pub fn deinit(wasm: *Wasm, gpa: Allocator) void {
     wasm.segments.deinit(gpa);
     wasm.global_symbols.deinit(gpa);
     wasm.objects.deinit(gpa);
+    wasm.archives.deinit(gpa);
     wasm.functions.deinit(gpa);
     wasm.types.deinit(gpa);
     wasm.imports.deinit(gpa);
@@ -187,6 +188,8 @@ pub fn deinit(wasm: *Wasm, gpa: Allocator) void {
     wasm.exports.deinit(gpa);
     wasm.elements.deinit(gpa);
     wasm.tables.deinit(gpa);
+    wasm.string_table.deinit(gpa);
+    wasm.undefs.deinit(gpa);
     wasm.file.close();
     wasm.* = undefined;
 }
@@ -283,6 +286,7 @@ pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
     for (wasm.objects.items) |_, obj_idx| {
         try wasm.resolveSymbolsInObject(gpa, @intCast(u16, obj_idx));
     }
+    try wasm.resolveSymbolsInArchives(gpa);
     for (wasm.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), wasm);
     }
@@ -499,6 +503,42 @@ fn resolveSymbolsInObject(wasm: *Wasm, gpa: Allocator, object_index: u16) !void 
         if (existing_sym.isUndefined()) {
             assert(wasm.undefs.swapRemove(sym_name));
         }
+    }
+}
+
+/// Resolves the symbols in each archive file.
+/// When resolved to a symbol from an object file,
+/// this will result into loading the object file within
+/// the archive file and linking with it.
+fn resolveSymbolsInArchives(wasm: *Wasm, gpa: Allocator) !void {
+    if (wasm.archives.items.len == 0) return;
+
+    log.debug("Resolving symbols in archives", .{});
+    var index: u32 = 0;
+    undef_loop: while (index < wasm.undefs.count()) {
+        const undef_sym_loc = wasm.undefs.values()[index];
+        const sym_name = undef_sym_loc.getName(wasm);
+
+        for (wasm.archives.items) |archive| {
+            const offset = archive.toc.get(sym_name) orelse {
+                // symbol does not exist in this archive
+                continue;
+            };
+
+            log.debug("Detected symbol '{s}' in archive '{s}', parsing objects..", .{ sym_name, archive.name });
+            // Symbol is found in unparsed object file within current archive.
+            // Parse object and and resolve symbols again before we check remaining
+            // undefined symbols.
+            const object_file_index = @intCast(u16, wasm.objects.items.len);
+            var object = try archive.parseObject(gpa, offset.items[0]);
+            try wasm.objects.append(gpa, object);
+            try wasm.resolveSymbolsInObject(gpa, object_file_index);
+
+            // continue loop for any remaining undefined symbols that still exist
+            // after resolving last object file
+            continue :undef_loop;
+        }
+        index += 1;
     }
 }
 

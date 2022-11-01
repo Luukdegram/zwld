@@ -1,11 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Wasm = @import("Wasm.zig");
 const mem = std.mem;
 
 const io = std.io;
 
-var gpa_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = gpa_allocator.allocator();
+var gpa_allocator = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 10 }){};
+const gpa = if (builtin.mode == .Debug or !builtin.link_libc)
+    gpa_allocator.allocator()
+else
+    std.heap.c_allocator;
 
 pub fn log(
     comptime level: std.log.Level,
@@ -37,7 +41,7 @@ const usage =
 ;
 
 pub fn main() !void {
-    defer if (@import("builtin").mode == .Debug) {
+    defer if (builtin.mode == .Debug) {
         _ = gpa_allocator.deinit();
     };
 
