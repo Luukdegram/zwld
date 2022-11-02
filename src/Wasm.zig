@@ -35,6 +35,10 @@ global_symbols: std.AutoHashMapUnmanaged(u32, SymbolWithLoc) = .{},
 managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// Maps atoms to their segment index
 atoms: std.AutoHashMapUnmanaged(u32, *Atom) = .{},
+/// Maps a symbol's location to an atom. This can be used to find meta
+/// data of a symbol, such as its size, or its offset to perform a relocation.
+/// Undefined (and synthetic) symbols do not have an Atom and therefore cannot be mapped.
+symbol_atom: std.AutoHashMapUnmanaged(SymbolWithLoc, *Atom) = .{},
 /// All symbols created by the linker, rather than through
 /// object files will be inserted in this list to manage them.
 synthetic_symbols: std.StringArrayHashMapUnmanaged(Symbol) = .{},
@@ -115,6 +119,18 @@ pub const SymbolWithLoc = struct {
             return object.string_table.get(object.symtable[loc.sym_index].name);
         }
         return wasm_bin.string_table.get(wasm_bin.synthetic_symbols.values()[loc.sym_index].name);
+    }
+
+    /// From a given symbol location, returns the final location.
+    /// e.g. when a symbol was resolved and replaced by the symbol
+    /// in a different file, this will return said location.
+    /// If the symbol wasn't replaced by another, this will return
+    /// the given location itwasm.
+    pub fn finalLoc(loc: SymbolWithLoc, wasm_bin: *const Wasm) SymbolWithLoc {
+        if (wasm_bin.discarded.get(loc)) |new_loc| {
+            return new_loc.finalLoc(wasm_bin);
+        }
+        return loc;
     }
 };
 
