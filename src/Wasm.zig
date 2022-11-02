@@ -188,6 +188,7 @@ pub fn deinit(wasm: *Wasm, gpa: Allocator) void {
         atom.deinit(gpa);
     }
     wasm.synthetic_symbols.deinit(gpa);
+    wasm.symbol_atom.deinit(gpa);
     wasm.discarded.deinit(gpa);
     wasm.resolved_symbols.deinit(gpa);
     wasm.managed_atoms.deinit(gpa);
@@ -308,7 +309,7 @@ pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
     }
     try wasm.setupStart();
     try wasm.mergeImports(gpa);
-    try wasm.allocateAtoms();
+    try wasm.allocateAtoms(gpa);
     try wasm.setupMemory();
     try wasm.mergeSections(gpa);
     try wasm.mergeTypes(gpa);
@@ -922,33 +923,27 @@ pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom: *Atom) !
     }
 }
 
-fn allocateAtoms(wasm: *Wasm) !void {
+fn allocateAtoms(wasm: *Wasm, gpa: Allocator) !void {
     var it = wasm.atoms.iterator();
+    try wasm.symbol_atom.ensureUnusedCapacity(gpa, wasm.atoms.count());
     while (it.next()) |entry| {
-        const segment_index = entry.key_ptr.*;
-        const segment: *Segment = &wasm.segments.items[segment_index];
+        const segment = &wasm.segments.items[entry.key_ptr.*];
         var atom: *Atom = entry.value_ptr.*.getFirst();
-
-        log.debug("Allocating atoms for segment '{d}'", .{segment_index});
-
         var offset: u32 = 0;
         while (true) {
             offset = std.mem.alignForwardGeneric(u32, offset, atom.alignment);
             atom.offset = offset;
-            const object: *Object = &wasm.objects.items[atom.file];
-            const symbol = &object.symtable[atom.sym_index];
-
+            const symbol_loc = atom.symbolLoc();
             log.debug("Atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8} size={d}", .{
-                object.string_table.get(symbol.name),
+                symbol_loc.getName(wasm),
                 offset,
                 offset + atom.size,
                 atom.size,
             });
-
             offset += atom.size;
+            try wasm.symbol_atom.put(gpa, symbol_loc, atom); // Update atom pointers
             atom = atom.next orelse break;
         }
-
         segment.size = std.mem.alignForwardGeneric(u32, offset, segment.alignment);
     }
 }
