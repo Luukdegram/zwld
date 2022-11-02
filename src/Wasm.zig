@@ -314,7 +314,7 @@ pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
     try wasm.mergeSections(gpa);
     try wasm.mergeTypes(gpa);
     try wasm.setupExports(gpa);
-    try wasm.relocateAtoms();
+    wasm.relocateAtoms();
 
     try @import("emit_wasm.zig").emit(wasm, gpa);
 }
@@ -679,9 +679,8 @@ fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
         try wasm.exports.append(gpa, .{ .name = "memory", .kind = .memory, .index = 0 });
     }
 
-    var symbol_it = SymbolIterator.init(wasm);
-    while (symbol_it.next()) |entry| {
-        const symbol = entry.symbol;
+    for (wasm.resolved_symbols.keys()) |sym_loc| {
+        const symbol = sym_loc.getSymbol(wasm);
         if (!symbol.isExported()) continue;
 
         const name: []const u8 = wasm.string_table.get(symbol.name);
@@ -700,7 +699,7 @@ fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
             wasm.string_table.get(symbol.name), name, symbol.index,
         });
         try wasm.exports.append(gpa, exported);
-        try wasm.exports.appendSymbol(gpa, entry.symbol);
+        try wasm.exports.appendSymbol(gpa, symbol);
     }
     log.debug("Completed building exports. Total count: ({d})", .{wasm.exports.count()});
 }
@@ -728,40 +727,6 @@ fn setupLinkerSymbols(wasm: *Wasm, gpa: Allocator) !void {
     try wasm.resolved_symbols.putNoClobber(gpa, loc, {});
     try wasm.global_symbols.putNoClobber(gpa, name_offset, loc);
 }
-
-const SymbolIterator = struct {
-    symbol_index: u32,
-    file_index: u16,
-    wasm: *Wasm,
-
-    const Entry = struct {
-        sym_index: u32,
-        file_index: u16,
-        symbol: *Symbol,
-    };
-
-    fn init(wasm_bin: *Wasm) SymbolIterator {
-        return .{ .symbol_index = 0, .file_index = 0, .wasm = wasm_bin };
-    }
-
-    fn next(iterator: *SymbolIterator) ?Entry {
-        if (iterator.file_index >= iterator.wasm.objects.items.len) return null;
-        const object: *Object = &iterator.wasm.objects.items[iterator.file_index];
-        if (iterator.symbol_index >= object.symtable.len) {
-            iterator.file_index += 1;
-            iterator.symbol_index = 0;
-            return iterator.next();
-        }
-
-        const symbol = &object.symtable[iterator.symbol_index];
-        defer iterator.symbol_index += 1;
-        return Entry{
-            .sym_index = iterator.symbol_index,
-            .file_index = iterator.file_index,
-            .symbol = symbol,
-        };
-    }
-};
 
 fn mergeImports(wasm: *Wasm, gpa: Allocator) !void {
     const maybe_func_table_offset = wasm.string_table.getOffset("__indirect_function_table");
@@ -792,52 +757,45 @@ fn mergeImports(wasm: *Wasm, gpa: Allocator) !void {
 /// Sets up the memory section of the wasm module, as well as the stack.
 fn setupMemory(wasm: *Wasm) !void {
     log.debug("Setting up memory layout", .{});
-    const page_size = 64 * 1024;
-    const stack_size = wasm.options.stack_size orelse page_size * 1;
-    const stack_alignment = 16;
-    const stack_first = wasm.options.stack_first;
+    const page_size = std.wasm.page_size;
+    const stack_size = wasm.options.stack_size orelse page_size;
+    const stack_alignment = 16; // wasm's stack alignment as specified by tool-convention
+    // Always place the stack at the start by default
+    // unless the user specified the global-base flag
+    var place_stack_first = true;
+    var memory_ptr: u64 = if (wasm.options.global_base) |base| blk: {
+        place_stack_first = false;
+        break :blk base;
+    } else 0;
 
-    var memory_ptr: u32 = 0;
-    if (!stack_first and wasm.options.global_base != null) {
-        memory_ptr = wasm.options.global_base.?;
-    }
-
-    if (stack_first) {
-        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
+    if (place_stack_first) {
+        memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
-        // set stack value on global
-        if (wasm.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
-            const global: *std.wasm.Global = &wasm.globals.items.items[stack_pointer.index];
-            global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
-        }
+        // We always put the stack pointer global at index 0
+        wasm.globals.items.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
     }
 
-    var offset: u32 = memory_ptr;
-    for (wasm.segments.items) |*segment, i| {
-        // skip 'code' segments
-        if (wasm.code_section_index) |index| {
-            if (index == i) continue;
-        }
-        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, segment.alignment);
+    var offset: u32 = @intCast(u32, memory_ptr);
+    for (wasm.data_segments.values()) |segment_index| {
+        const segment = &wasm.segments.items[segment_index];
+        memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, segment.alignment);
         memory_ptr += segment.size;
         segment.offset = offset;
         offset += segment.size;
     }
 
-    if (!stack_first) {
-        memory_ptr = std.mem.alignForwardGeneric(u32, memory_ptr, stack_alignment);
+    if (!place_stack_first) {
+        memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
         memory_ptr += stack_size;
-        // set stack value on global
-        if (wasm.synthetic_symbols.get("__stack_pointer")) |stack_pointer| {
-            const global: *std.wasm.Global = &wasm.globals.items.items[stack_pointer.index];
-            global.init = .{ .i32_const = @bitCast(i32, memory_ptr) };
-        }
+        wasm.globals.items.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
     }
 
     // Setup the max amount of pages
-    const max_memory_allowed: u32 = (1 << 32) - 1;
+    // For now we only support wasm32 by setting the maximum allowed memory size 2^32-1
+    const max_memory_allowed: u64 = (1 << 32) - 1;
+
     if (wasm.options.initial_memory) |initial_memory| {
-        if (!std.mem.isAligned(initial_memory, page_size)) {
+        if (!std.mem.isAlignedGeneric(u64, initial_memory, page_size)) {
             log.err("Initial memory must be {d}-byte aligned", .{page_size});
             return error.MissAlignment;
         }
@@ -854,11 +812,11 @@ fn setupMemory(wasm: *Wasm) !void {
 
     // In case we do not import memory, but define it ourselves,
     // set the minimum amount of pages on the memory section.
-    wasm.memories.limits.min = std.mem.alignForwardGeneric(u32, memory_ptr, page_size) / page_size;
+    wasm.memories.limits.min = @intCast(u32, std.mem.alignForwardGeneric(u64, memory_ptr, page_size) / page_size);
     log.debug("Total memory pages: {d}", .{wasm.memories.limits.min});
 
     if (wasm.options.max_memory) |max_memory| {
-        if (!std.mem.isAligned(max_memory, page_size)) {
+        if (!std.mem.isAlignedGeneric(u64, max_memory, page_size)) {
             log.err("Maximum memory must be {d}-byte aligned", .{page_size});
             return error.MissAlignment;
         }
@@ -870,7 +828,7 @@ fn setupMemory(wasm: *Wasm) !void {
             log.err("Maximum memory exceeds maxmium amount {d}", .{max_memory_allowed});
             return error.MemoryTooBig;
         }
-        wasm.memories.limits.max = max_memory / page_size;
+        wasm.memories.limits.max = @intCast(u32, max_memory / page_size);
         log.debug("Maximum memory pages: {?d}", .{wasm.memories.limits.max});
     }
 }
@@ -948,13 +906,13 @@ fn allocateAtoms(wasm: *Wasm, gpa: Allocator) !void {
     }
 }
 
-fn relocateAtoms(wasm: *Wasm) !void {
+fn relocateAtoms(wasm: *Wasm) void {
     var it = wasm.atoms.valueIterator();
     while (it.next()) |next_atom| {
         var atom: *Atom = next_atom.*.getFirst();
         while (true) {
             // First perform relocations to rewrite the binary data
-            try atom.resolveRelocs(wasm);
+            atom.resolveRelocs(wasm);
             atom = atom.next orelse break;
         }
     }

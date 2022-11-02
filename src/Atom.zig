@@ -92,7 +92,7 @@ pub fn symbolLoc(atom: *const Atom) Wasm.SymbolWithLoc {
 
 /// Resolves the relocations within the atom, writing the new value
 /// at the calculated offset.
-pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) !void {
+pub fn resolveRelocs(atom: *Atom, wasm_bin: *const Wasm) void {
     if (atom.relocs.items.len == 0) return;
     const sym_name = atom.symbolLoc().getName(wasm_bin);
 
