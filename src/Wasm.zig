@@ -881,7 +881,45 @@ pub fn appendAtomAtIndex(wasm: *Wasm, gpa: Allocator, index: u32, atom: *Atom) !
     }
 }
 
+/// Sorts the data segments into the preffered order of:
+/// - .rodata
+/// - .data
+/// - .text
+/// - <others> (.bss)
+fn sortDataSegments(wasm: *Wasm, gpa: Allocator) !void {
+    var new_mapping: std.StringArrayHashMapUnmanaged(u32) = .{};
+    try new_mapping.ensureUnusedCapacity(gpa, wasm.data_segments.count());
+    errdefer new_mapping.deinit(gpa);
+
+    const keys = try gpa.dupe([]const u8, wasm.data_segments.keys());
+    defer gpa.free(keys);
+
+    const SortContext = struct {
+        fn sort(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return order(lhs) <= order(rhs);
+        }
+
+        fn order(name: []const u8) u8 {
+            if (mem.startsWith(u8, name, ".rodata")) return 0;
+            if (mem.startsWith(u8, name, ".data")) return 1;
+            if (mem.startsWith(u8, name, ".text")) return 2;
+            return 3;
+        }
+    };
+
+    std.sort.sort([]const u8, keys, {}, SortContext.sort);
+    for (keys) |key| {
+        const segment_index = wasm.data_segments.get(key).?;
+        new_mapping.putAssumeCapacity(key, segment_index);
+    }
+    wasm.data_segments.deinit(gpa);
+    wasm.data_segments = new_mapping;
+}
+
 fn allocateAtoms(wasm: *Wasm, gpa: Allocator) !void {
+    // first sort the data segments
+    try wasm.sortDataSegments(gpa);
+
     var it = wasm.atoms.iterator();
     try wasm.symbol_atom.ensureUnusedCapacity(gpa, wasm.atoms.count());
     while (it.next()) |entry| {
