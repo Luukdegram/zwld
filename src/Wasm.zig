@@ -613,11 +613,17 @@ fn mergeSections(wasm: *Wasm, gpa: Allocator) !void {
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
         const object = wasm.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: *Symbol = &object.symtable[sym_with_loc.sym_index];
-        if (symbol.isUndefined()) continue; // skip imports
+        if (symbol.isUndefined() or (symbol.tag != .function and symbol.tag != .global and symbol.tag != .table)) {
+            // Skip undefined symbols as they go in the `import` section
+            // Also skip symbols that do not need to have a section merged.
+            continue;
+        }
+
+        const offset = object.importedCountByKind(symbol.tag.externalType());
+        const index = symbol.index - offset;
         switch (symbol.tag) {
             .function => {
-                const offset = object.importedCountByKind(.function);
-                const original_func = object.functions[symbol.index - offset];
+                const original_func = object.functions[index];
                 symbol.index = try wasm.functions.append(
                     gpa,
                     wasm.imports.functionCount(),
@@ -625,8 +631,7 @@ fn mergeSections(wasm: *Wasm, gpa: Allocator) !void {
                 );
             },
             .global => {
-                const offset = object.importedCountByKind(.global);
-                const original_global = object.globals[symbol.index - offset];
+                const original_global = object.globals[index];
                 symbol.index = try wasm.globals.append(
                     gpa,
                     wasm.imports.globalCount(),
@@ -634,15 +639,14 @@ fn mergeSections(wasm: *Wasm, gpa: Allocator) !void {
                 );
             },
             .table => {
-                const offset = object.importedCountByKind(.table);
-                const original_table = object.tables[symbol.index - offset];
+                const original_table = object.tables[index];
                 symbol.index = try wasm.tables.append(
                     gpa,
                     wasm.imports.tableCount(),
                     original_table,
                 );
             },
-            else => {},
+            else => unreachable,
         }
     }
     log.debug("Merged ({d}) functions", .{wasm.functions.count()});
@@ -650,8 +654,18 @@ fn mergeSections(wasm: *Wasm, gpa: Allocator) !void {
     log.debug("Merged ({d}) tables", .{wasm.tables.count()});
 }
 
+/// Merges function types of all object files into the final
+/// 'types' section, while assigning the type index to the representing
+/// section (import, export, function).
 fn mergeTypes(wasm: *Wasm, gpa: Allocator) !void {
     log.debug("Merging types", .{});
+    // A map to track which functions have already had their
+    // type inserted. If we do this for the same function multiple times,
+    // it will be overwritten with the incorrect type.
+    var dirty = std.AutoHashMap(u32, void).init(gpa);
+    try dirty.ensureUnusedCapacity(wasm.functions.count());
+    defer dirty.deinit();
+
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
         const object = wasm.objects.items[sym_with_loc.file orelse continue]; // synthetic symbols do not need to be merged
         const symbol: Symbol = object.symtable[sym_with_loc.sym_index];
@@ -661,13 +675,14 @@ fn mergeTypes(wasm: *Wasm, gpa: Allocator) !void {
                 const value = &wasm.imports.imported_functions.values()[symbol.index];
                 value.type = try wasm.types.append(gpa, object.func_types[value.type]);
                 continue;
+            } else if (!dirty.contains(symbol.index)) {
+                log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
+                const func = &wasm.functions.items.items[symbol.index - wasm.imports.functionCount()];
+                func.type_index = try wasm.types.append(gpa, object.func_types[func.type_index]);
             }
-            log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
-            const func = &wasm.functions.items.items[symbol.index - wasm.imports.functionCount()];
-            func.type_index = try wasm.types.append(gpa, object.func_types[func.type_index]);
         }
     }
-    log.debug("Completed building types. Total count: ({d})", .{wasm.types.count()});
+    log.debug("Completed merging and deduplicating types. Total count: ({d})", .{wasm.types.count()});
 }
 
 fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
@@ -683,23 +698,17 @@ fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
         const symbol = sym_loc.getSymbol(wasm);
         if (!symbol.isExported()) continue;
 
-        const name: []const u8 = wasm.string_table.get(symbol.name);
-        var exported: std.wasm.Export = undefined;
-        if (symbol.tag == .function) {
-            exported = .{ .name = name, .kind = .function, .index = symbol.index };
-        } else {
-            log.warn("TODO: Export non-functions type({s}) name={s}", .{
-                @tagName(symbol.tag),
-                name,
-            });
-            continue;
-        }
+        const name = sym_loc.getName(wasm);
+        const exported: std.wasm.Export = .{
+            .name = name,
+            .kind = symbol.tag.externalType(),
+            .index = symbol.index,
+        };
 
         log.debug("Appending export from symbol '{s}' using name: '{s}' index: {d}", .{
-            wasm.string_table.get(symbol.name), name, symbol.index,
+            name, name, symbol.index,
         });
         try wasm.exports.append(gpa, exported);
-        try wasm.exports.appendSymbol(gpa, symbol);
     }
     log.debug("Completed building exports. Total count: ({d})", .{wasm.exports.count()});
 }

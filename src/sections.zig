@@ -384,17 +384,9 @@ pub const Exports = struct {
     /// as linker-defined exports such as __stack_pointer.
     items: std.ArrayListUnmanaged(std.wasm.Export) = .{},
 
-    /// Contains a list of pointers to symbols
-    /// TODO: Do we really need this list?
-    symbols: std.ArrayListUnmanaged(*Symbol) = .{},
-
     /// Appends a given `wasm.Export` to the list of output exports.
     pub fn append(self: *Exports, gpa: Allocator, exp: std.wasm.Export) !void {
         try self.items.append(gpa, exp);
-    }
-
-    pub fn appendSymbol(self: *Exports, gpa: Allocator, symbol: *Symbol) !void {
-        try self.symbols.append(gpa, symbol);
     }
 
     /// Returns the amount of entries in the export section
@@ -404,7 +396,6 @@ pub const Exports = struct {
 
     pub fn deinit(self: *Exports, gpa: Allocator) void {
         self.items.deinit(gpa);
-        self.symbols.deinit(gpa);
         self.* = undefined;
     }
 };
