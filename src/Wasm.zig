@@ -314,7 +314,6 @@ pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
     try wasm.mergeSections(gpa);
     try wasm.mergeTypes(gpa);
     try wasm.setupExports(gpa);
-    wasm.relocateAtoms();
 
     try @import("emit_wasm.zig").emit(wasm, gpa);
 }
@@ -722,6 +721,7 @@ fn setupLinkerSymbols(wasm: *Wasm, gpa: Allocator) !void {
         .tag = .global,
         .index = 0,
     };
+    symbol.setFlag(.WASM_SYM_VISIBILITY_HIDDEN);
 
     const global: std.wasm.Global = .{
         .init = .{ .i32_const = 0 },
@@ -950,18 +950,6 @@ fn allocateAtoms(wasm: *Wasm, gpa: Allocator) !void {
             atom = atom.next orelse break;
         }
         segment.size = std.mem.alignForwardGeneric(u32, offset, segment.alignment);
-    }
-}
-
-fn relocateAtoms(wasm: *Wasm) void {
-    var it = wasm.atoms.valueIterator();
-    while (it.next()) |next_atom| {
-        var atom: *Atom = next_atom.*.getFirst();
-        while (true) {
-            // First perform relocations to rewrite the binary data
-            atom.resolveRelocs(wasm);
-            atom = atom.next orelse break;
-        }
     }
 }
 

@@ -7,6 +7,7 @@ const std = @import("std");
 const Symbol = @import("Symbol.zig");
 const types = @import("types.zig");
 const Wasm = @import("Wasm.zig");
+const Atom = @import("Atom.zig");
 
 const fs = std.fs;
 const leb = std.leb;
@@ -104,13 +105,29 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
         log.debug("Writing 'Code' section ({d})", .{wasm.functions.count()});
         const offset = try reserveSectionHeader(file);
         var atom = wasm.atoms.get(index).?.getFirst();
-        while (true) {
-            try leb.writeULEB128(writer, atom.size);
-            try writer.writeAll(atom.code.items);
 
-            if (atom.next) |next| {
-                atom = next;
-            } else break;
+        // The code section must be sorted in line with the function order.
+        var sorted_atoms = try std.ArrayList(*Atom).initCapacity(gpa, wasm.functions.count());
+        defer sorted_atoms.deinit();
+
+        while (true) {
+            atom.resolveRelocs(wasm);
+            sorted_atoms.appendAssumeCapacity(atom);
+            atom = atom.next orelse break;
+        }
+
+        const atom_sort_fn = struct {
+            fn sort(ctx: *const Wasm, lhs: *const Atom, rhs: *const Atom) bool {
+                const lhs_sym = lhs.symbolLoc().getSymbol(ctx);
+                const rhs_sym = rhs.symbolLoc().getSymbol(ctx);
+                return lhs_sym.index < rhs_sym.index;
+            }
+        }.sort;
+
+        std.sort.sort(*Atom, sorted_atoms.items, wasm, atom_sort_fn);
+        for (sorted_atoms.items) |sorted_atom| {
+            try leb.writeULEB128(writer, sorted_atom.size);
+            try writer.writeAll(sorted_atom.code.items);
         }
         try emitSectionHeader(file, offset, .code, wasm.functions.count());
     }
@@ -134,6 +151,7 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
 
             var current_offset: u32 = 0;
             while (true) {
+                atom.resolveRelocs(wasm);
                 // TODO: Verify if this is faster than allocating segment's size
                 // Setting all zeroes, memcopy all segments and then writing.
                 if (current_offset != atom.offset) {
@@ -164,35 +182,33 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     }
 
     // names section
-    {
-        const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
-        const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
-        var funcs = try std.ArrayList(*const Symbol).initCapacity(gpa, func_count);
-        defer funcs.deinit();
-        var globals = try std.ArrayList(*const Symbol).initCapacity(gpa, global_count);
-        defer globals.deinit();
+    const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
+    const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
+    var funcs = try std.ArrayList(*const Symbol).initCapacity(gpa, func_count);
+    defer funcs.deinit();
+    var globals = try std.ArrayList(*const Symbol).initCapacity(gpa, global_count);
+    defer globals.deinit();
 
-        for (wasm.resolved_symbols.keys()) |sym_with_loc| {
-            const symbol = sym_with_loc.getSymbol(wasm);
-            switch (symbol.tag) {
-                .function => funcs.appendAssumeCapacity(symbol),
-                .global => globals.appendAssumeCapacity(symbol),
-                else => {}, // do not emit 'names' section for other symbols
-            }
+    for (wasm.resolved_symbols.keys()) |sym_with_loc| {
+        const symbol = sym_with_loc.getSymbol(wasm);
+        switch (symbol.tag) {
+            .function => funcs.appendAssumeCapacity(symbol),
+            .global => globals.appendAssumeCapacity(symbol),
+            else => {}, // do not emit 'names' section for other symbols
         }
-
-        std.sort.sort(*const Symbol, funcs.items, {}, lessThan);
-        std.sort.sort(*const Symbol, globals.items, {}, lessThan);
-
-        const offset = try reserveCustomSectionHeader(file);
-        try leb.writeULEB128(writer, @intCast(u32, "name".len));
-        try writer.writeAll("name");
-
-        try emitNameSection(wasm, 0x01, gpa, funcs.items, writer);
-        try emitNameSection(wasm, 0x07, gpa, globals.items, writer);
-        try emitDataNamesSection(wasm, gpa, writer);
-        try emitCustomHeader(file, offset);
     }
+
+    std.sort.sort(*const Symbol, funcs.items, {}, lessThan);
+    std.sort.sort(*const Symbol, globals.items, {}, lessThan);
+
+    const offset = try reserveCustomSectionHeader(file);
+    try leb.writeULEB128(writer, @intCast(u32, "name".len));
+    try writer.writeAll("name");
+
+    try emitNameSection(wasm, 0x01, gpa, funcs.items, writer);
+    try emitNameSection(wasm, 0x07, gpa, globals.items, writer);
+    try emitDataNamesSection(wasm, gpa, writer);
+    try emitCustomHeader(file, offset);
 }
 
 /// Sorts symbols based on the index of the object they target
