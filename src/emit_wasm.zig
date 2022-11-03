@@ -184,53 +184,62 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     // names section
     const func_count: u32 = wasm.functions.count() + wasm.imports.functionCount();
     const global_count: u32 = wasm.globals.count() + wasm.imports.globalCount();
-    var funcs = try std.ArrayList(*const Symbol).initCapacity(gpa, func_count);
+    // we must de-duplicate symbols that point to the same function
+    var funcs = std.AutoArrayHashMap(u32, Wasm.SymbolWithLoc).init(gpa);
     defer funcs.deinit();
-    var globals = try std.ArrayList(*const Symbol).initCapacity(gpa, global_count);
+    try funcs.ensureUnusedCapacity(func_count);
+    var globals = try std.ArrayList(Wasm.SymbolWithLoc).initCapacity(gpa, global_count);
     defer globals.deinit();
 
     for (wasm.resolved_symbols.keys()) |sym_with_loc| {
         const symbol = sym_with_loc.getSymbol(wasm);
         switch (symbol.tag) {
-            .function => funcs.appendAssumeCapacity(symbol),
-            .global => globals.appendAssumeCapacity(symbol),
+            .function => {
+                const gop = try funcs.getOrPut(symbol.index);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = sym_with_loc;
+                }
+            },
+            .global => globals.appendAssumeCapacity(sym_with_loc),
             else => {}, // do not emit 'names' section for other symbols
         }
     }
 
-    std.sort.sort(*const Symbol, funcs.items, {}, lessThan);
-    std.sort.sort(*const Symbol, globals.items, {}, lessThan);
+    std.sort.sort(Wasm.SymbolWithLoc, funcs.values(), wasm, lessThan);
+    std.sort.sort(Wasm.SymbolWithLoc, globals.items, wasm, lessThan);
 
     const offset = try reserveCustomSectionHeader(file);
     try leb.writeULEB128(writer, @intCast(u32, "name".len));
     try writer.writeAll("name");
 
-    try emitNameSection(wasm, 0x01, gpa, funcs.items, writer);
+    try emitNameSection(wasm, 0x01, gpa, funcs.values(), writer);
     try emitNameSection(wasm, 0x07, gpa, globals.items, writer);
     try emitDataNamesSection(wasm, gpa, writer);
     try emitCustomHeader(file, offset);
 }
 
 /// Sorts symbols based on the index of the object they target
-fn lessThan(context: void, lhs: *const Symbol, rhs: *const Symbol) bool {
-    _ = context;
-    return lhs.index < rhs.index;
+fn lessThan(wasm: *const Wasm, lhs: Wasm.SymbolWithLoc, rhs: Wasm.SymbolWithLoc) bool {
+    const lhs_sym = lhs.getSymbol(wasm);
+    const rhs_sym = rhs.getSymbol(wasm);
+    return lhs_sym.index < rhs_sym.index;
 }
 
-fn emitSymbol(wasm: *const Wasm, symbol: *const Symbol, writer: anytype) !void {
+fn emitSymbol(wasm: *const Wasm, loc: Wasm.SymbolWithLoc, writer: anytype) !void {
+    const symbol = loc.getSymbol(wasm);
+    const name = loc.getName(wasm);
     try leb.writeULEB128(writer, symbol.index);
-    const name = wasm.string_table.get(symbol.name);
     try leb.writeULEB128(writer, @intCast(u32, name.len));
     try writer.writeAll(name);
 }
 
-fn emitNameSection(wasm: *const Wasm, name_type: u8, gpa: std.mem.Allocator, items: []*const Symbol, writer: anytype) !void {
+fn emitNameSection(wasm: *const Wasm, name_type: u8, gpa: std.mem.Allocator, items: []const Wasm.SymbolWithLoc, writer: anytype) !void {
     var section_list = std.ArrayList(u8).init(gpa);
     defer section_list.deinit();
     const sec_writer = section_list.writer();
 
     try leb.writeULEB128(sec_writer, @intCast(u32, items.len));
-    for (items) |sym| try emitSymbol(wasm, sym, sec_writer);
+    for (items) |sym_loc| try emitSymbol(wasm, sym_loc, sec_writer);
     try leb.writeULEB128(writer, name_type);
     try leb.writeULEB128(writer, @intCast(u32, section_list.items.len));
     try writer.writeAll(section_list.items);
