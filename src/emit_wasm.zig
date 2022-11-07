@@ -216,6 +216,8 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     try emitNameSection(wasm, 0x07, gpa, globals.items, writer);
     try emitDataNamesSection(wasm, gpa, writer);
     try emitCustomHeader(file, offset);
+
+    try emitProducerSection(file, wasm, writer);
 }
 
 /// Sorts symbols based on the index of the object they target
@@ -446,4 +448,59 @@ fn emitElement(wasm: *Wasm, writer: anytype) !void {
         const symbol = wasm.objects.items[sym_with_loc.file.?].symtable[sym_with_loc.sym_index];
         try leb.writeULEB128(writer, symbol.index);
     }
+}
+
+fn emitProducerSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void {
+    _ = wasm; // loop over objects to obtain all languages + tools
+    const header_offset = try reserveCustomSectionHeader(file);
+
+    const producers = "producers";
+    try leb.writeULEB128(writer, @intCast(u32, producers.len));
+    try writer.writeAll(producers);
+
+    try leb.writeULEB128(writer, @as(u32, 1)); // 2 fields: Language + processed-by
+
+    // used for the linker version
+    var version_buf: [100]u8 = undefined;
+    const version = try std.fmt.bufPrint(&version_buf, "{s}", .{"0.1"}); // TODO: use actual version
+
+    // language field
+    {
+        // const language = "language";
+        // try leb.writeULEB128(writer, @intCast(u32, language.len));
+        // try writer.writeAll(language);
+
+        // // field_value_count (TODO: Parse object files for producer sections to detect their language)
+        // try leb.writeULEB128(writer, @as(u32, 1));
+
+        // // versioned name
+        // {
+        //     try leb.writeULEB128(writer, @as(u32, 3)); // len of "Zig"
+        //     try writer.writeAll("Zig");
+
+        //     try leb.writeULEB128(writer, @intCast(u32, version.len));
+        //     try writer.writeAll(version);
+        // }
+    }
+
+    // processed-by field
+    {
+        const processed_by = "processed-by";
+        try leb.writeULEB128(writer, @intCast(u32, processed_by.len));
+        try writer.writeAll(processed_by);
+
+        // field_value_count (TODO: Parse object files for producer sections to detect other used tools)
+        try leb.writeULEB128(writer, @as(u32, 1));
+
+        // versioned name
+        {
+            try leb.writeULEB128(writer, @as(u32, 3)); // len of "Zld"
+            try writer.writeAll("Zld");
+
+            try leb.writeULEB128(writer, @intCast(u32, version.len));
+            try writer.writeAll(version);
+        }
+    }
+
+    try emitCustomHeader(file, header_offset);
 }
