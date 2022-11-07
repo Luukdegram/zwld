@@ -252,8 +252,9 @@ fn emitDataNamesSection(wasm: *Wasm, gpa: std.mem.Allocator, writer: anytype) !v
     defer section_list.deinit();
     const sec_writer = section_list.writer();
 
-    try leb.writeULEB128(sec_writer, @intCast(u32, wasm.data_segments.count()));
+    try leb.writeULEB128(sec_writer, wasm.dataCount());
     for (wasm.data_segments.keys()) |key, index| {
+        if (std.mem.eql(u8, key, ".bss") and !wasm.options.import_memory) continue;
         try leb.writeULEB128(sec_writer, @intCast(u32, index));
         try leb.writeULEB128(sec_writer, @intCast(u32, key.len));
         try sec_writer.writeAll(key);
