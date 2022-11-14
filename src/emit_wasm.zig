@@ -217,7 +217,7 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     try emitDataNamesSection(wasm, gpa, writer);
     try emitCustomHeader(file, offset);
 
-    try emitProducerSection(file, wasm, writer);
+    try emitProducerSection(file, wasm, gpa, writer);
 }
 
 /// Sorts symbols based on the index of the object they target
@@ -451,55 +451,131 @@ fn emitElement(wasm: *Wasm, writer: anytype) !void {
     }
 }
 
-fn emitProducerSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void {
-    _ = wasm; // loop over objects to obtain all languages + tools
+const ProducerField = struct {
+    value: []const u8,
+    version: []const u8,
+
+    const Context = struct {
+        pub fn hash(ctx: Context, field: ProducerField) u32 {
+            _ = ctx;
+            var hasher = std.hash.Wyhash.init(0);
+            hasher.update(field.value);
+            hasher.update(field.version);
+            return @truncate(u32, hasher.final());
+        }
+
+        pub fn eql(ctx: Context, lhs: ProducerField, rhs: ProducerField, index: usize) bool {
+            _ = ctx;
+            _ = index;
+            return std.mem.eql(u8, lhs.value, rhs.value) and std.mem.eql(u8, lhs.version, rhs.version);
+        }
+    };
+};
+
+fn emitProducerSection(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator, writer: anytype) !void {
     const header_offset = try reserveCustomSectionHeader(file);
+
+    var languages_map = std.ArrayHashMap(ProducerField, void, ProducerField.Context, false).init(gpa);
+    defer for (languages_map.keys()) |key| {
+        gpa.free(key.value);
+        gpa.free(key.version);
+    } else languages_map.deinit();
+
+    var processed_map = std.ArrayHashMap(ProducerField, void, ProducerField.Context, false).init(gpa);
+    defer for (processed_map.keys()) |key| {
+        gpa.free(key.value);
+        gpa.free(key.version);
+    } else processed_map.deinit();
+
+    try processed_map.put(.{ .value = try gpa.dupe(u8, "Zld"), .version = try gpa.dupe(u8, "0.1") }, {});
+
+    for (wasm.objects.items) |object| {
+        if (object.producers.len != 0) {
+            var fbs = std.io.fixedBufferStream(object.producers);
+            const reader = fbs.reader();
+
+            const field_count = try leb.readULEB128(u32, reader);
+            var field_index: u32 = 0;
+            while (field_index < field_count) : (field_index += 1) {
+                const field_name_len = try leb.readULEB128(u32, reader);
+                const field_name = try gpa.alloc(u8, field_name_len);
+                defer gpa.free(field_name);
+                try reader.readNoEof(field_name);
+
+                const value_count = try leb.readULEB128(u32, reader);
+                var value_index: u32 = 0;
+                while (value_index < value_count) : (value_index += 1) {
+                    const name_len = try leb.readULEB128(u32, reader);
+                    const name = try gpa.alloc(u8, name_len);
+                    errdefer gpa.free(name);
+                    try reader.readNoEof(name);
+
+                    const version_len = try leb.readULEB128(u32, reader);
+                    const version = try gpa.alloc(u8, version_len);
+                    errdefer gpa.free(version);
+                    try reader.readNoEof(version);
+
+                    log.debug("parsed producer field", .{});
+                    log.debug("  value '{s}'", .{name});
+                    log.debug("  version '{s}'", .{version});
+
+                    if (std.mem.eql(u8, field_name, "language")) {
+                        try languages_map.put(.{ .value = name, .version = version }, {});
+                    } else if (std.mem.eql(u8, field_name, "processed-by")) {
+                        try processed_map.put(.{ .value = name, .version = version }, {});
+                    } else {
+                        log.err("Invalid field name '{s}' in 'producers' section", .{field_name});
+                        log.err("  referenced in '{s}'", .{object.name});
+                    }
+                }
+            }
+        }
+    }
 
     const producers = "producers";
     try leb.writeULEB128(writer, @intCast(u32, producers.len));
     try writer.writeAll(producers);
 
-    try leb.writeULEB128(writer, @as(u32, 1)); // 2 fields: Language + processed-by
+    var fields_count: u32 = 1; // always have a processed-by field
+    const languages_count = @intCast(u32, languages_map.count());
 
-    // used for the linker version
-    var version_buf: [100]u8 = undefined;
-    const version = try std.fmt.bufPrint(&version_buf, "{s}", .{"0.1"}); // TODO: use actual version
-
-    // language field
-    {
-        // const language = "language";
-        // try leb.writeULEB128(writer, @intCast(u32, language.len));
-        // try writer.writeAll(language);
-
-        // // field_value_count (TODO: Parse object files for producer sections to detect their language)
-        // try leb.writeULEB128(writer, @as(u32, 1));
-
-        // // versioned name
-        // {
-        //     try leb.writeULEB128(writer, @as(u32, 3)); // len of "Zig"
-        //     try writer.writeAll("Zig");
-
-        //     try leb.writeULEB128(writer, @intCast(u32, version.len));
-        //     try writer.writeAll(version);
-        // }
+    if (languages_count > 0) {
+        fields_count += 1;
     }
 
-    // processed-by field
+    try leb.writeULEB128(writer, @as(u32, fields_count));
+
+    if (languages_count > 0) {
+        const language = "language";
+        try leb.writeULEB128(writer, @intCast(u32, language.len));
+        try writer.writeAll(language);
+
+        try leb.writeULEB128(writer, languages_count);
+
+        for (languages_map.keys()) |field| {
+            try leb.writeULEB128(writer, @intCast(u32, field.value.len));
+            try writer.writeAll(field.value);
+
+            try leb.writeULEB128(writer, @intCast(u32, field.version.len));
+            try writer.writeAll(field.version);
+        }
+    }
+
+    // processed-by field (this is never empty as it's always populated by Zld itself)
     {
         const processed_by = "processed-by";
         try leb.writeULEB128(writer, @intCast(u32, processed_by.len));
         try writer.writeAll(processed_by);
 
-        // field_value_count (TODO: Parse object files for producer sections to detect other used tools)
-        try leb.writeULEB128(writer, @as(u32, 1));
+        try leb.writeULEB128(writer, @intCast(u32, processed_map.count()));
 
         // versioned name
-        {
-            try leb.writeULEB128(writer, @as(u32, 3)); // len of "Zld"
-            try writer.writeAll("Zld");
+        for (processed_map.keys()) |field| {
+            try leb.writeULEB128(writer, @intCast(u32, field.value.len)); // len of "Zld"
+            try writer.writeAll(field.value);
 
-            try leb.writeULEB128(writer, @intCast(u32, version.len));
-            try writer.writeAll(version);
+            try leb.writeULEB128(writer, @intCast(u32, field.version.len));
+            try writer.writeAll(field.version);
         }
     }
 

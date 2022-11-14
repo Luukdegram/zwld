@@ -67,6 +67,10 @@ string_table: Wasm.StringTable = .{},
 /// Each name is terminated by a null-terminator. The name can be found,
 /// from the `index` offset within the `RelocatableData`.
 debug_names: [:0]const u8,
+/// Contains the entire `producers` section as a single slice of bytes.
+/// Must be parsed to extract its data. This is done so we only parse it
+/// when its data is actually needed.
+producers: []const u8 = &.{},
 
 /// Represents a single item within a section (depending on its `type`)
 const RelocatableData = struct {
@@ -173,6 +177,7 @@ pub fn deinit(object: *Object, gpa: Allocator) void {
     }
     gpa.free(object.elements);
     gpa.free(object.features);
+    gpa.free(object.producers);
     for (object.relocations.values()) |val| {
         gpa.free(val);
     }
@@ -379,6 +384,12 @@ fn Parser(comptime ReaderType: type) type {
                             try parser.parseRelocations(gpa);
                         } else if (std.mem.eql(u8, name, "target_features")) {
                             try parser.parseFeatures(gpa);
+                        } else if (std.mem.eql(u8, name, "producers")) {
+                            const size = @intCast(u32, reader.context.bytes_left);
+                            const content = try gpa.alloc(u8, size);
+                            errdefer gpa.free(content);
+                            try reader.readNoEof(content);
+                            parser.object.producers = content;
                         } else if (std.mem.startsWith(u8, name, ".debug")) {
                             const debug_size = @intCast(u32, reader.context.bytes_left);
                             const debug_content = try gpa.alloc(u8, debug_size);
