@@ -218,6 +218,7 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     try emitCustomHeader(file, offset);
 
     try emitProducerSection(file, wasm, gpa, writer);
+    try emitFeaturesSection(file, wasm, writer);
 }
 
 /// Sorts symbols based on the index of the object they target
@@ -576,6 +577,30 @@ fn emitProducerSection(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator,
 
             try leb.writeULEB128(writer, @intCast(u32, field.version.len));
             try writer.writeAll(field.version);
+        }
+    }
+
+    try emitCustomHeader(file, header_offset);
+}
+
+fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void {
+    const used_count = wasm.used_features.count();
+    if (used_count == 0) return; // when no features are used, we omit the entire section
+    const header_offset = try reserveCustomSectionHeader(file);
+
+    const target_features = "target_features";
+    try leb.writeULEB128(writer, @intCast(u32, target_features.len));
+    try writer.writeAll(target_features);
+
+    try leb.writeULEB128(writer, used_count);
+    var it = wasm.used_features.iterator();
+    while (it.next()) |feature_tag| {
+        if (wasm.used_features.isEnabled(feature_tag)) {
+            const feature: types.Feature = .{ .prefix = .used, .tag = feature_tag };
+            try leb.writeULEB128(writer, @enumToInt(feature.prefix));
+            const feature_name = feature.tag.toString();
+            try leb.writeULEB128(writer, @intCast(u32, feature_name.len));
+            try writer.writeAll(feature_name);
         }
     }
 

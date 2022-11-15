@@ -169,7 +169,22 @@ pub const Options = struct {
 };
 
 const FeatureSet = struct {
-    set: std.bit_set.IntegerBitSet(types.known_features.kvs.len) = .{ .mask = 0 }, // everything disabled by default
+    set: SetType = .{ .mask = 0 }, // everything disabled by default
+
+    const SetType = std.bit_set.IntegerBitSet(types.known_features.kvs.len);
+
+    const Iterator = struct {
+        /// The iterator that will return the index of the next feature
+        /// This should never be used directly, unless the index of a feature
+        /// is required directly.
+        inner: SetType.Iterator(.{}),
+
+        /// Returns the next feature in the set
+        pub fn next(it: *Iterator) ?types.Feature.Tag {
+            const index = it.inner.next() orelse return null;
+            return @intToEnum(types.Feature.Tag, index);
+        }
+    };
 
     /// Returns true when a given `feature` is enabled
     pub fn isEnabled(set: FeatureSet, feature: types.Feature.Tag) bool {
@@ -184,6 +199,11 @@ const FeatureSet = struct {
     /// The amount of features that have been set
     pub fn count(set: FeatureSet) u32 {
         return @intCast(u32, set.set.count());
+    }
+
+    /// Returns an iterator through the features in the set by its index
+    pub fn iterator(set: *const FeatureSet) Iterator {
+        return .{ .inner = set.set.iterator(.{}) };
     }
 };
 
