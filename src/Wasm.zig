@@ -5,9 +5,9 @@ const std = @import("std");
 const Atom = @import("Atom.zig");
 const Object = @import("Object.zig");
 const Archive = @import("Archive.zig");
-const types = @import("types.zig");
 const Symbol = @import("Symbol.zig");
 const sections = @import("sections.zig");
+const types = @import("types.zig");
 
 const leb = std.leb;
 const fs = std.fs;
@@ -56,7 +56,7 @@ string_table: StringTable = .{},
 
 // OUTPUT SECTIONS //
 /// Output function signature types
-types: sections.Types = .{},
+func_types: sections.Types = .{},
 /// Output import section
 imports: sections.Imports = .{},
 /// Output function section
@@ -73,6 +73,8 @@ globals: sections.Globals = .{},
 exports: sections.Exports = .{},
 /// Output element section
 elements: sections.Elements = .{},
+/// Features which are used by the resulting binary
+used_features: FeatureSet = .{},
 /// Index to a function defining the entry of the wasm file
 entry: ?u32 = null,
 /// Output data section, keyed by the segment name
@@ -161,6 +163,28 @@ pub const Options = struct {
     stack_first: bool = false,
     /// Specifies the size of the stack in bytes
     stack_size: ?u32 = null,
+    /// Comma-delimited list of features to use.
+    /// When empty, the used features are inferred from the objects instead.
+    features: []const u8,
+};
+
+const FeatureSet = struct {
+    set: std.bit_set.IntegerBitSet(types.known_features.kvs.len) = .{ .mask = 0 }, // everything disabled by default
+
+    /// Returns true when a given `feature` is enabled
+    pub fn isEnabled(set: FeatureSet, feature: types.Feature.Tag) bool {
+        return set.set.isSet(@enumToInt(feature));
+    }
+
+    /// Enables the given `feature`
+    pub fn enable(set: *FeatureSet, feature: types.Feature.Tag) void {
+        set.set.set(@enumToInt(feature));
+    }
+
+    /// The amount of features that have been set
+    pub fn count(set: FeatureSet) u32 {
+        return @intCast(u32, set.set.count());
+    }
 };
 
 /// Initializes a new wasm binary file at the given path.
@@ -199,7 +223,7 @@ pub fn deinit(wasm: *Wasm, gpa: Allocator) void {
     wasm.objects.deinit(gpa);
     wasm.archives.deinit(gpa);
     wasm.functions.deinit(gpa);
-    wasm.types.deinit(gpa);
+    wasm.func_types.deinit(gpa);
     wasm.imports.deinit(gpa);
     wasm.globals.deinit(gpa);
     wasm.exports.deinit(gpa);
@@ -307,6 +331,7 @@ pub fn flush(wasm: *Wasm, gpa: Allocator) !void {
     for (wasm.objects.items) |*object, obj_idx| {
         try object.parseIntoAtoms(gpa, @intCast(u16, obj_idx), wasm);
     }
+    try wasm.validateFeatures();
     try wasm.setupStart();
     try wasm.mergeImports(gpa);
     try wasm.allocateAtoms(gpa);
@@ -593,7 +618,7 @@ fn getFunctionSignature(wasm: *const Wasm, loc: SymbolWithLoc) std.wasm.Type {
         return obj.func_types[type_index];
     }
     assert(!is_undefined);
-    return wasm.types.get(wasm.functions.items.items[symbol.index].type_index).*;
+    return wasm.func_types.get(wasm.functions.items.items[symbol.index].type_index).*;
 }
 
 /// Calculates the new indexes for symbols and their respective symbols
@@ -672,16 +697,16 @@ fn mergeTypes(wasm: *Wasm, gpa: Allocator) !void {
             if (symbol.isUndefined()) {
                 log.debug("Adding type from extern function '{s}'", .{object.string_table.get(symbol.name)});
                 const value = &wasm.imports.imported_functions.values()[symbol.index];
-                value.type = try wasm.types.append(gpa, object.func_types[value.type]);
+                value.type = try wasm.func_types.append(gpa, object.func_types[value.type]);
                 continue;
             } else if (!dirty.contains(symbol.index)) {
                 log.debug("Adding type from function '{s}'", .{object.string_table.get(symbol.name)});
                 const func = &wasm.functions.items.items[symbol.index - wasm.imports.functionCount()];
-                func.type_index = try wasm.types.append(gpa, object.func_types[func.type_index]);
+                func.type_index = try wasm.func_types.append(gpa, object.func_types[func.type_index]);
             }
         }
     }
-    log.debug("Completed merging and deduplicating types. Total count: ({d})", .{wasm.types.count()});
+    log.debug("Completed merging and deduplicating types. Total count: ({d})", .{wasm.func_types.count()});
 }
 
 fn setupExports(wasm: *Wasm, gpa: Allocator) !void {
@@ -971,4 +996,105 @@ fn setupStart(wasm: *Wasm) !void {
     // for synthetic symbols such as __wasm_start, __wasm_init_memory, and
     // __wasm_apply_global_relocs
     symbol.setFlag(.WASM_SYM_EXPORTED);
+}
+
+fn validateFeatures(wasm: *Wasm) !void {
+    const infer = wasm.options.features.len == 0; // when the user did not define any features, we infer them from linked objects.
+    const known_features_count = types.known_features.kvs.len;
+
+    var allowed: FeatureSet = .{};
+    var used = [_]u17{0} ** known_features_count;
+    var disallowed = [_]u17{0} ** known_features_count;
+    var required = [_]u17{0} ** known_features_count;
+
+    // when false, we fail linking. We only verify this after a loop to catch all invalid features.
+    var valid_feature_set = true;
+
+    // When the user has given an explicit list of features to enable,
+    // we extract them and insert each into the 'allowed' list.
+    if (!infer) {
+        var it = std.mem.split(u8, wasm.options.features, ",");
+        while (it.next()) |feature_name| {
+            const feature = types.known_features.get(feature_name) orelse {
+                log.err("Unknown feature name '{s}' passed as option", .{feature_name});
+                return error.UnknownFeature;
+            };
+            allowed.enable(feature);
+        }
+    }
+
+    // extract all the used, disallowed and required features from each
+    // linked object file so we can test them.
+    for (wasm.objects.items) |object, object_index| {
+        for (object.features) |feature| {
+            const value = @intCast(u16, object_index) << 1 | @as(u1, 1);
+            switch (feature.prefix) {
+                .used => {
+                    used[@enumToInt(feature.tag)] = value;
+                },
+                .disallowed => {
+                    disallowed[@enumToInt(feature.tag)] = value;
+                },
+                .required => {
+                    required[@enumToInt(feature.tag)] = value;
+                    used[@enumToInt(feature.tag)] = value;
+                },
+            }
+        }
+    }
+
+    // when we infer the features, we allow each feature found in the 'used' set
+    // and insert it into the 'allowed' set. When features are not inferred,
+    // we validate that a used feature is allowed.
+    for (used) |used_set, used_index| {
+        const is_enabled = @truncate(u1, used_set) != 0;
+        if (!is_enabled) continue;
+        const feature = @intToEnum(types.Feature.Tag, used_index);
+        if (infer) {
+            allowed.enable(feature);
+        } else if (!allowed.isEnabled(feature)) {
+            log.err("feature '{s}' not allowed, but used by linked object", .{feature.toString()});
+            log.err("  defined in '{s}'", .{wasm.objects.items[used_set >> 1].name});
+            valid_feature_set = false;
+        }
+    }
+
+    if (!valid_feature_set) {
+        return error.InvalidFeatureSet;
+    }
+
+    // For each linked object, validate the required and disallowed features
+    for (wasm.objects.items) |object| {
+        var object_used_features = [_]bool{false} ** known_features_count;
+        for (object.features) |feature| {
+            if (feature.prefix == .disallowed) continue; // already defined in 'disallowed' set.
+            // from here a feature is always used
+            const disallowed_feature = disallowed[@enumToInt(feature.tag)];
+            if (@truncate(u1, disallowed_feature) != 0) {
+                log.err("feature '{s}' is disallowed, but used by linked object", .{feature.tag.toString()});
+                log.err("  disallowed by '{s}'", .{wasm.objects.items[disallowed_feature >> 1].name});
+                log.err("  used in '{s}'", .{object.name});
+                valid_feature_set = false;
+            }
+
+            object_used_features[@enumToInt(feature.tag)] = true;
+        }
+
+        // validate the linked object file has each required feature
+        for (required) |required_feature, feature_index| {
+            const is_required = @truncate(u1, required_feature) != 0;
+            if (is_required and !object_used_features[feature_index]) {
+                log.err("feature '{s}' is required but not used in linked object", .{(@intToEnum(types.Feature.Tag, feature_index)).toString()});
+                log.err("  required by '{s}'", .{wasm.objects.items[required_feature >> 1].name});
+                log.err("  missing in '{s}'", .{object.name});
+                valid_feature_set = false;
+            }
+        }
+    }
+
+    if (!valid_feature_set) {
+        return error.InvalidFeatureSet;
+    }
+
+    wasm.used_features = allowed;
 }

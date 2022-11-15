@@ -22,13 +22,13 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     try emitWasmHeader(writer);
 
     // emit sections
-    if (wasm.types.count() != 0) {
-        log.debug("Writing 'Types' section ({d})", .{wasm.types.count()});
+    if (wasm.func_types.count() != 0) {
+        log.debug("Writing 'Types' section ({d})", .{wasm.func_types.count()});
         const offset = try reserveSectionHeader(file);
-        for (wasm.types.items.items) |type_entry| {
+        for (wasm.func_types.items.items) |type_entry| {
             try emitType(type_entry, writer);
         }
-        try emitSectionHeader(file, offset, .type, wasm.types.count());
+        try emitSectionHeader(file, offset, .type, wasm.func_types.count());
     }
     if (wasm.imports.symbolCount() != 0 or wasm.options.import_memory) {
         const count = wasm.imports.symbolCount() + @boolToInt(wasm.options.import_memory);

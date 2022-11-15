@@ -38,6 +38,7 @@ const usage =
     \\--no-entry                         Do not output any entry point
     \\--stack-first                      Place stack at start of linear memory instead of after data
     \\--stack-size=<value>               Specifies the stack size in bytes
+    \\--features=<value>                 Comma-delimited list of used features, inferred by object files if unset
 ;
 
 pub fn main() !void {
@@ -70,6 +71,7 @@ pub fn main() !void {
     var output_path: ?[]const u8 = null;
     var stack_first = false;
     var stack_size: ?u32 = null;
+    var features: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -146,6 +148,12 @@ pub fn main() !void {
             i += 1;
             continue;
         }
+        if (mem.startsWith(u8, arg, "--features")) {
+            const index = mem.indexOfScalar(u8, arg, '=') orelse printErrorAndExit("Missing '=' symbol and value for features list", .{});
+            features = arg[index + 1 ..];
+            i += 1;
+            continue;
+        }
         if (mem.startsWith(u8, arg, "--")) {
             printErrorAndExit("Unknown argument '{s}'", .{arg});
         }
@@ -171,6 +179,7 @@ pub fn main() !void {
         .no_entry = no_entry,
         .stack_first = stack_first,
         .stack_size = stack_size,
+        .features = features orelse &.{},
     });
     defer wasm_bin.deinit(gpa);
 
