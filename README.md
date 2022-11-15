@@ -28,6 +28,7 @@ Options:
 --no-entry                         Do not output any entry point
 --stack-first                      Place stack at start of linear memory instead of after data
 --stack-size=<value>               Specifies the stack size in bytes
+--features=<value>                 Comma-delimited list of used features, inferred by object files if unset
 ```
 
 ## Building
