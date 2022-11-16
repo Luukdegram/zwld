@@ -86,6 +86,22 @@ data_segments: std.StringArrayHashMapUnmanaged(u32) = .{},
 
 /// Index into `atoms` that represents the code section
 code_section_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_info' section.
+debug_info_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_line' section.
+debug_line_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_loc' section.
+debug_loc_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_ranges' section.
+debug_ranges_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_pubnames' section.
+debug_pubnames_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_pubtypes' section.
+debug_pubtypes_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_pubtypes' section.
+debug_str_index: ?u32 = null,
+/// The index of the segment representing the custom '.debug_pubtypes' section.
+debug_abbrev_index: ?u32 = null,
 
 pub const Segment = struct {
     alignment: u32,
@@ -919,8 +935,72 @@ pub fn getMatchingSegment(wasm: *Wasm, gpa: Allocator, object_index: u16, reloca
             });
             break :blk index;
         },
-        .debug => return null,
+        .debug => {
+            const debug_name = object.getDebugName(relocatable_data);
+            if (mem.eql(u8, debug_name, ".debug_info")) {
+                return wasm.debug_info_index orelse blk: {
+                    wasm.debug_info_index = index;
+                    try wasm.appendDummySegment(gpa);
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_line")) {
+                return wasm.debug_line_index orelse blk: {
+                    wasm.debug_line_index = index;
+                    try wasm.appendDummySegment(gpa);
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_loc")) {
+                return wasm.debug_loc_index orelse blk: {
+                    wasm.debug_loc_index = index;
+                    try wasm.appendDummySegment(gpa);
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_ranges")) {
+                return wasm.debug_line_index orelse blk: {
+                    wasm.debug_ranges_index = index;
+                    try wasm.appendDummySegment(gpa);
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_pubnames")) {
+                return wasm.debug_pubnames_index orelse blk: {
+                    wasm.debug_pubnames_index = index;
+                    try wasm.appendDummySegment(gpa);
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_pubtypes")) {
+                return wasm.debug_pubtypes_index orelse blk: {
+                    wasm.debug_pubtypes_index = index;
+                    try wasm.appendDummySegment(gpa);
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_abbrev")) {
+                return wasm.debug_abbrev_index orelse blk: {
+                    wasm.debug_abbrev_index = index;
+                    try wasm.appendDummySegment(gpa);
+                    break :blk index;
+                };
+            } else if (mem.eql(u8, debug_name, ".debug_str")) {
+                return wasm.debug_str_index orelse blk: {
+                    wasm.debug_str_index = index;
+                    try wasm.appendDummySegment(gpa);
+                    break :blk index;
+                };
+            } else {
+                log.warn("found unknown debug section '{s}'", .{debug_name});
+                log.warn("  debug section will be skipped", .{});
+                return null;
+            }
+        },
     }
+}
+
+/// Appends a new segment with default field values
+fn appendDummySegment(wasm: *Wasm, gpa: Allocator) !void {
+    try wasm.segments.append(gpa, .{
+        .alignment = 1,
+        .size = 0,
+        .offset = 0,
+    });
 }
 
 /// From a given index, append the given `Atom` at the back of the linked list.
