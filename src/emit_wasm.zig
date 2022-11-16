@@ -217,6 +217,7 @@ pub fn emit(wasm: *Wasm, gpa: std.mem.Allocator) !void {
     try emitDataNamesSection(wasm, gpa, writer);
     try emitCustomHeader(file, offset);
 
+    try emitDebugSections(file, wasm, gpa, writer);
     try emitProducerSection(file, wasm, gpa, writer);
     try emitFeaturesSection(file, wasm, writer);
 }
@@ -605,4 +606,47 @@ fn emitFeaturesSection(file: fs.File, wasm: *const Wasm, writer: anytype) !void 
     }
 
     try emitCustomHeader(file, header_offset);
+}
+
+fn emitDebugSections(file: fs.File, wasm: *const Wasm, gpa: std.mem.Allocator, writer: anytype) !void {
+    var debug_bytes = std.ArrayList(u8).init(gpa);
+    defer debug_bytes.deinit();
+
+    const DebugSection = struct {
+        name: []const u8,
+        index: ?u32,
+    };
+
+    const debug_sections: []const DebugSection = &.{
+        .{ .name = ".debug_info", .index = wasm.debug_info_index },
+        .{ .name = ".debug_pubtypes", .index = wasm.debug_pubtypes_index },
+        .{ .name = ".debug_abbrev", .index = wasm.debug_abbrev_index },
+        .{ .name = ".debug_line", .index = wasm.debug_line_index },
+        .{ .name = ".debug_str", .index = wasm.debug_str_index },
+        .{ .name = ".debug_pubnames", .index = wasm.debug_pubnames_index },
+        .{ .name = ".debug_loc", .index = wasm.debug_loc_index },
+        .{ .name = ".debug_ranges", .index = wasm.debug_ranges_index },
+    };
+
+    for (debug_sections) |item| {
+        if (item.index) |index| {
+            const segment = wasm.segments.items[index];
+            if (segment.size == 0) continue;
+            try debug_bytes.ensureUnusedCapacity(segment.size);
+            var atom = wasm.atoms.get(index).?.getFirst();
+            while (true) {
+                atom.resolveRelocs(wasm);
+                debug_bytes.appendSliceAssumeCapacity(atom.code.items);
+                atom = atom.next orelse break;
+            }
+            const header_offset = try reserveCustomSectionHeader(file);
+            try leb.writeULEB128(writer, @intCast(u32, item.name.len));
+            try writer.writeAll(item.name);
+
+            try writer.writeAll(debug_bytes.items);
+
+            try emitCustomHeader(file, header_offset);
+            debug_bytes.clearRetainingCapacity();
+        }
+    }
 }
