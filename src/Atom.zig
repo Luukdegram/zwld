@@ -178,8 +178,16 @@ fn relocationValue(atom: *Atom, relocation: types.Relocation, wasm_bin: *const W
             return @intCast(u32, rel_value);
         },
         .R_WASM_EVENT_INDEX_LEB => return symbol.index,
-        .R_WASM_SECTION_OFFSET_I32,
-        .R_WASM_FUNCTION_OFFSET_I32,
-        => return std.debug.panic("TODO", .{}),
+        .R_WASM_SECTION_OFFSET_I32 => {
+            const target_atom = wasm_bin.symbol_atom.get(target_loc).?;
+            const rel_value = @intCast(i32, target_atom.offset) + relocation.addend;
+            return @intCast(u32, rel_value);
+        },
+        .R_WASM_FUNCTION_OFFSET_I32 => {
+            const target_atom = wasm_bin.symbol_atom.get(target_loc).?;
+            const offset: u32 = 11 + Wasm.getULEB128Size(target_atom.size); // Header (11 bytes fixed-size) + body size (leb-encoded)
+            const rel_value = @intCast(i32, target_atom.offset + offset) + relocation.addend;
+            return @intCast(u32, rel_value);
+        },
     }
 }

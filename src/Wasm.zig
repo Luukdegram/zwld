@@ -1198,3 +1198,17 @@ fn validateFeatures(wasm: *Wasm) !void {
 
     wasm.used_features = allowed;
 }
+
+/// From a given unsigned integer, returns the size it takes
+/// in bytes to store the integer using leb128-encoding.
+pub fn getULEB128Size(uint_value: anytype) u32 {
+    const T = @TypeOf(uint_value);
+    const U = if (@typeInfo(T).Int.bits < 8) u8 else T;
+    var value = @intCast(U, uint_value);
+
+    var size: u32 = 0;
+    while (value != 0) : (size += 1) {
+        value >>= 7;
+    }
+    return size;
+}
