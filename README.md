@@ -1,5 +1,7 @@
 # zwld
 
+> *Note:* This repository has been archived as all development is now being done in [zld](https://github.com/kubkon/zld) and the [Zig toolchain](https://github.com/ziglang/zig)
+
 Experimental linker for wasm object files.
 The idea is to implement a linker that stays close to wasm-ld in regards to features
 ~so that one day this could potentially be used within the Zig self-hosted compiler to incrementally
